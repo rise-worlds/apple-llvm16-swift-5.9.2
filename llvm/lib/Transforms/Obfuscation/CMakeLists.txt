@@ -11,6 +11,7 @@ add_llvm_component_library(LLVMObfuscation
         AntiDebugging.cpp
         AntiHooking.cpp
         StringEncryption.cpp
+        StringObfuscation.cpp
         IndirectBranch.cpp
         FunctionWrapper.cpp
         ConstantEncryption.cpp

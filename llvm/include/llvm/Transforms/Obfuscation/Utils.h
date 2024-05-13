@@ -6,6 +6,7 @@
 
 namespace llvm {
 
+std::string readAnnotate(Function *f); // 读取llvm.global.annotations中的annotation值
 void fixStack(Function *f);
 bool toObfuscate(bool flag, Function *f, std::string attribute);
 bool toObfuscateBoolOption(Function *f, std::string option, bool *val);
@@ -17,6 +18,7 @@ void annotation2Metadata(Module &M);
 bool readAnnotationMetadata(Function *f, std::string annotation);
 void writeAnnotationMetadata(Function *f, std::string annotation);
 bool AreUsersInOneFunction(GlobalVariable *GV);
+void LowerConstantExpr(Function &F);
 #if 0
 std::map<GlobalValue*, StringRef> BuildAnnotateMap(Module& M);
 #endif

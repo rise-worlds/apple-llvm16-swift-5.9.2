@@ -54,6 +54,9 @@ static cl::opt<bool>
 static cl::opt<bool>
     EnableFunctionWrapper("enable-funcwra", cl::init(false), cl::NotHidden,
                           cl::desc("Enable Function Wrapper."));
+static cl::opt<bool>
+    EnableStringObfuscation("enable-strobf", cl::init(false), cl::NotHidden,
+                          cl::desc("Enable String Obfuscation."));
 // End Obfuscator Options
 
 static void LoadEnv(void) {
@@ -95,6 +98,9 @@ static void LoadEnv(void) {
   }
   if (getenv("ADB")) {
     EnableAntiDebugging = true;
+  }
+  if (getenv("STROBF")) {
+    EnableStringObfuscation = true;
   }
 }
 namespace llvm {
@@ -140,6 +146,10 @@ struct Obfuscation : public ModulePass {
     // Now Encrypt Strings
     MP = createStringEncryptionPass(EnableAllObfuscation ||
                                     EnableStringEncryption);
+    MP->runOnModule(M);
+    // Now Obfuscation Strings
+    MP = createStringObfuscation(EnableAllObfuscation ||
+                                    EnableStringObfuscation);
     MP->runOnModule(M);
     delete MP;
     // Now perform Function-Level Obfuscation
@@ -225,5 +235,6 @@ INITIALIZE_PASS_DEPENDENCY(FunctionCallObfuscate);
 INITIALIZE_PASS_DEPENDENCY(IndirectBranch);
 INITIALIZE_PASS_DEPENDENCY(SplitBasicBlock);
 INITIALIZE_PASS_DEPENDENCY(StringEncryption);
+INITIALIZE_PASS_DEPENDENCY(StringObfuscation);
 INITIALIZE_PASS_DEPENDENCY(Substitution);
 INITIALIZE_PASS_END(Obfuscation, "obfus", "Enable Obfuscation", false, false)
