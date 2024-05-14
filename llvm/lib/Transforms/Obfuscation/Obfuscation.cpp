@@ -147,6 +147,7 @@ struct Obfuscation : public ModulePass {
     MP = createStringEncryptionPass(EnableAllObfuscation ||
                                     EnableStringEncryption);
     MP->runOnModule(M);
+    delete MP;
     // Now Obfuscation Strings
     MP = createStringObfuscation(EnableAllObfuscation ||
                                     EnableStringObfuscation);
