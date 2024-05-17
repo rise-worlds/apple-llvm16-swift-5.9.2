@@ -1,4 +1,4 @@
-#include <sstream>
+#include <strstream>
 #include <string>
 // System libs
 #include <algorithm>
@@ -16,6 +16,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
@@ -23,17 +24,12 @@
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
-#define DEBUG_TYPE "strenc"
+#define DEBUG_TYPE "string-obfuscation"
 
 using namespace llvm;
 
 using namespace std;
 namespace llvm {
-struct EncryptedGV {
-  GlobalVariable *GV;
-  uint64_t key;
-  uint32_t len;
-};
 
 class StringObfuscation : public ModulePass {
 public:
@@ -80,6 +76,9 @@ public:
     this->flag = flag;
     // EncryptedStringTable = new GlobalVariable;
   }
+  StringRef getPassName() const override { return "StringObfuscation"; }
+  static bool isRequired() { return true; } // 直接返回true即可
+
   bool runOnModule(Module &M) override { // Pass实现函数
     outs() << "Running StringObfuscation\n";
 
@@ -226,7 +225,7 @@ public:
     }
   }
   bool processConstantStringUse(Function *F) {
-    if (!toObfuscate(flag, F, "cse")) {
+    if (!toObfuscate(flag, F, "strobf")) {
       return false;
     }
     LowerConstantExpr(*F);
@@ -369,21 +368,21 @@ public:
     LLVMContext &Ctx = M->getContext();
     IRBuilder<> IRB(Ctx);
     FunctionType *FuncTy = FunctionType::get(
-        Type::getVoidTy(Ctx), {IRB.getInt8PtrTy(), IRB.getInt8PtrTy()}, false);
-    Function *DecFunc = Function::Create(
-        FuncTy, GlobalValue::PrivateLinkage,
-        "rise_decrypt_string_" + Twine::utohexstr(Entry->ID), M);
-
-    auto ArgIt = DecFunc->arg_begin();
-    Argument *PlainString = ArgIt; // output
-    ++ArgIt;
-    Argument *Data = ArgIt; // input
-
+        Type::getVoidTy(Ctx),
+        {Type::getInt8PtrTy(Ctx), Type::getInt8PtrTy(Ctx)}, false);
+    string funcName =
+        formatv("rise_decrypt_string_{0}", Twine::utohexstr(Entry->ID));
+    FunctionCallee callee = M->getOrInsertFunction(funcName, FuncTy);
+    Function *DecFunc = cast<Function>(callee.getCallee());
+    DecFunc->setCallingConv(CallingConv::C);
+    DecFunc->setLinkage(GlobalValue::PrivateLinkage);
+    Argument *PlainString = DecFunc->getArg(0);
     PlainString->setName("plain_string");
-    PlainString->addAttr(Attribute::NoCapture);
+    DecFunc->addParamAttr(0, Attribute::NoCapture);
+    Argument *Data = DecFunc->getArg(1);
     Data->setName("data");
-    Data->addAttr(Attribute::NoCapture);
-    Data->addAttr(Attribute::ReadOnly);
+    DecFunc->addParamAttr(1, Attribute::NoCapture);
+    DecFunc->addParamAttr(1, Attribute::ReadOnly);
 
     BasicBlock *Enter = BasicBlock::Create(Ctx, "Enter", DecFunc);
     BasicBlock *LoopBody = BasicBlock::Create(Ctx, "LoopBody", DecFunc);
@@ -524,8 +523,6 @@ public:
       lowerGlobalConstant(CV, IRB, GEP, CV->getType());
     }
   }
-
-  static bool isRequired() { return true; } // 直接返回true即可
 };
 } // namespace llvm
 
