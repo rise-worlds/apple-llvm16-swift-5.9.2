@@ -322,4 +322,146 @@ std::map<GlobalValue *, StringRef> BuildAnnotateMap(Module &M) {
 }
 #endif
 
+
+/**
+ * @brief 参考资料:https://www.jianshu.com/p/0567346fd5e8
+ *        作用是读取llvm.global.annotations中的annotation值 从而实现过滤函数
+ * 只对单独某功能开启PASS
+ * @param f
+ * @return std::string
+ */
+std::string readAnnotate(Function *f) { // 取自原版ollvm项目
+  std::string annotation = "";
+  /* Get annotation variable */
+  GlobalVariable *glob =
+      f->getParent()->getGlobalVariable("llvm.global.annotations");
+  if (glob != NULL) {
+    /* Get the array */
+    if (ConstantArray *ca = dyn_cast<ConstantArray>(glob->getInitializer())) {
+      for (unsigned i = 0; i < ca->getNumOperands(); ++i) {
+        /* Get the struct */
+        if (ConstantStruct *structAn =
+                dyn_cast<ConstantStruct>(ca->getOperand(i))) {
+          if (ConstantExpr *expr =
+                  dyn_cast<ConstantExpr>(structAn->getOperand(0))) {
+            /*
+             * If it's a bitcast we can check if the annotation is concerning
+             * the current function
+             */
+            if (expr->getOpcode() == Instruction::BitCast &&
+                expr->getOperand(0) == f) {
+              ConstantExpr *note = cast<ConstantExpr>(structAn->getOperand(1));
+              /*
+               * If it's a GetElementPtr, that means we found the variable
+               * containing the annotations
+               */
+              if (note->getOpcode() == Instruction::GetElementPtr) {
+                if (GlobalVariable *annoteStr =
+                        dyn_cast<GlobalVariable>(note->getOperand(0))) {
+                  if (ConstantDataSequential *data =
+                          dyn_cast<ConstantDataSequential>(
+                              annoteStr->getInitializer())) {
+                    if (data->isString()) {
+                      annotation += data->getAsString().lower() + " ";
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return (annotation);
+}
+
+/**
+ * @brief 用于判断是否开启混淆
+ *
+ * @param flag
+ * @param f
+ * @param attribute
+ * @return true
+ * @return false
+ */
+bool toObfuscate(bool flag, Function *f,
+                       std::string const &attribute) { // 取自原版ollvm项目
+  std::string attr = attribute;
+  std::string attrNo = "no" + attr;
+  // Check if declaration
+  if (f->isDeclaration()) {
+    return false;
+  }
+  // Check external linkage
+  if (f->hasAvailableExternallyLinkage() != 0) {
+    return false;
+  }
+  // We have to check the nofla flag first
+  // Because .find("fla") is true for a string like "fla" or
+  // "nofla"
+  if (readAnnotate(f).find(attrNo) != std::string::npos) { // 是否禁止开启XXX
+    return false;
+  }
+  // If fla annotations
+  if (readAnnotate(f).find(attr) != std::string::npos) { // 是否开启XXX
+    return true;
+  }
+  // If fla flag is set
+  if (flag == true) { // 开启PASS
+    return true;
+  }
+  return false;
+}
+
+void llvm::LowerConstantExpr(Function &F) {
+  SmallPtrSet<Instruction *, 8> WorkList;
+
+  for (inst_iterator It = inst_begin(F), E = inst_end(F); It != E; ++It) {
+    Instruction *I = &*It;
+
+    if (isa<LandingPadInst>(I) || isa<CatchPadInst>(I) ||
+        isa<CatchSwitchInst>(I) || isa<CatchReturnInst>(I))
+      continue;
+    if (auto *II = dyn_cast<IntrinsicInst>(I)) {
+      if (II->getIntrinsicID() == Intrinsic::eh_typeid_for) {
+        continue;
+      }
+    }
+
+    for (unsigned int i = 0; i < I->getNumOperands(); ++i) {
+      if (isa<ConstantExpr>(I->getOperand(i)))
+        WorkList.insert(I);
+    }
+  }
+
+  while (!WorkList.empty()) {
+    auto It = WorkList.begin();
+    Instruction *I = *It;
+    WorkList.erase(*It);
+
+    if (PHINode *PHI = dyn_cast<PHINode>(I)) {
+      for (unsigned int i = 0; i < PHI->getNumIncomingValues(); ++i) {
+        Instruction *TI = PHI->getIncomingBlock(i)->getTerminator();
+        if (ConstantExpr *CE =
+                dyn_cast<ConstantExpr>(PHI->getIncomingValue(i))) {
+          Instruction *NewInst = CE->getAsInstruction();
+          NewInst->insertBefore(TI);
+          PHI->setIncomingValue(i, NewInst);
+          WorkList.insert(NewInst);
+        }
+      }
+    } else {
+      for (unsigned int i = 0; i < I->getNumOperands(); ++i) {
+        if (ConstantExpr *CE = dyn_cast<ConstantExpr>(I->getOperand(i))) {
+          Instruction *NewInst = CE->getAsInstruction();
+          NewInst->insertBefore(I);
+          I->replaceUsesOfWith(CE, NewInst);
+          WorkList.insert(NewInst);
+        }
+      }
+    }
+  }
+}
+
 } // namespace llvm

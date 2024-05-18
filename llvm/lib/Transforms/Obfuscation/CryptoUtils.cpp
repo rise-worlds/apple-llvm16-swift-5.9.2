@@ -52,3 +52,13 @@ uint32_t CryptoUtils::get_range(uint32_t min, uint32_t max) {
   std::uniform_int_distribution<uint32_t> dis(min, max - 1);
   return dis(*eng);
 }
+void CryptoUtils::get_bytes(char* buffer, const int len) {
+  if (eng == nullptr)
+    prng_seed();
+  assert(buffer != nullptr && "CryptoUtils::get_bytes buffer=nullptr");
+  assert(len > 0 && "CryptoUtils::get_bytes len <= 0");
+
+  for (size_t i = 0; i < len; i++) {
+    buffer[i] = get<char>();
+  }
+}

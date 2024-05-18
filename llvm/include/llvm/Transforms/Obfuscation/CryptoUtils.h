@@ -18,6 +18,8 @@
 #define _CRYPTO_UTILS_H_
 
 #include "llvm/Support/ManagedStatic.h"
+
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <random>
@@ -51,6 +53,7 @@ public:
   // then use RNG to generate,fill and return the value
   uint32_t scramble32(uint32_t in,
                       std::map<uint32_t /*IDX*/, uint32_t /*VAL*/> &VMap);
+  void get_bytes(char *buffer, const int len);
 
 private:
   std::mt19937_64 *eng = nullptr;
