@@ -55,15 +55,15 @@ static __attribute__((__constructor__)) void Inj3c73d(int argc, char *argv[]) {
                 executablePath,
                 "__ZN4llvm18PassManagerBuilder25populateModulePassManagerERNS_"
                 "6legacy15PassManagerBaseE"),
-            (dobby_dummy_func_t)new_pmb, (dobby_dummy_func_t *)&old_pmb);
+            (asm_func_t)new_pmb, (asm_func_t *)&old_pmb);
   DobbyHook(
       DobbySymbolResolver(executablePath,
                           "__ZN4llvm11PassBuilder22buildO0DefaultPipelineENS_"
                           "17OptimizationLevelEb"),
-      (dobby_dummy_func_t)new_bo0dp, (dobby_dummy_func_t *)&old_bo0dp);
+      (asm_func_t)new_bo0dp, (asm_func_t *)&old_bo0dp);
   DobbyHook(DobbySymbolResolver(
                 executablePath,
                 "__ZN4llvm11PassBuilder29buildPerModuleDefaultPipelineENS_"
                 "17OptimizationLevelEb"),
-            (dobby_dummy_func_t)new_bpmdp, (dobby_dummy_func_t *)&old_bpmdp);
+            (asm_func_t)new_bpmdp, (asm_func_t *)&old_bpmdp);
 }
