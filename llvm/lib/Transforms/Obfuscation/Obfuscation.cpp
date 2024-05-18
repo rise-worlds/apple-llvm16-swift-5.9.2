@@ -56,7 +56,7 @@ static cl::opt<bool>
                           cl::desc("Enable Function Wrapper."));
 static cl::opt<bool>
     EnableStringObfuscation("enable-strobf", cl::init(false), cl::NotHidden,
-                          cl::desc("Enable String Obfuscation."));
+                            cl::desc("Enable String Obfuscation."));
 // End Obfuscator Options
 
 static void LoadEnv(void) {
@@ -150,7 +150,7 @@ struct Obfuscation : public ModulePass {
     delete MP;
     // Now Obfuscation Strings
     MP = createStringObfuscation(EnableAllObfuscation ||
-                                    EnableStringObfuscation);
+                                 EnableStringObfuscation);
     MP->runOnModule(M);
     delete MP;
     // Now perform Function-Level Obfuscation
@@ -208,14 +208,14 @@ struct Obfuscation : public ModulePass {
   } // End runOnModule
 };
 ModulePass *createObfuscationLegacyPass() {
+  errs() << "Initializing Hikari Core with Revision ID:" << GIT_COMMIT_HASH
+         << "\n";
   LoadEnv();
   if (AesSeed != 0x1337) {
     cryptoutils->prng_seed(AesSeed);
   } else {
     cryptoutils->prng_seed();
   }
-  errs() << "Initializing Hikari Core with Revision ID:" << GIT_COMMIT_HASH
-         << "\n";
   return new Obfuscation();
 }
 

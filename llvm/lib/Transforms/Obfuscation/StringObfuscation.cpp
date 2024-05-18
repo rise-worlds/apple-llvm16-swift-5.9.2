@@ -1,5 +1,3 @@
-#include <strstream>
-#include <string>
 // System libs
 #include <algorithm>
 #include <iomanip>
@@ -7,6 +5,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "llvm/ADT/Statistic.h"
@@ -18,9 +17,9 @@
 #include "llvm/Pass.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
 #include "llvm/Transforms/Obfuscation/StringObfuscation.h"
+#include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
@@ -60,7 +59,6 @@ public:
     // initialize DecGV
   };
 
-  CryptoUtils RandomEngine;
   std::vector<CSPEntry *> ConstantStringPool;
   std::map<GlobalVariable *, CSPEntry *> CSPEntryMap;
   std::map<GlobalVariable *, CSUser *> CSUserMap;
@@ -69,9 +67,7 @@ public:
 
   map<Function * /*Function*/, GlobalVariable * /*Decryption Status*/>
       encstatus;
-  StringObfuscation() : ModulePass(ID) {
-    this->flag = true;
-  }
+  StringObfuscation() : ModulePass(ID) { this->flag = true; }
   StringObfuscation(bool flag) : ModulePass(ID) {
     this->flag = flag;
     // EncryptedStringTable = new GlobalVariable;
@@ -473,7 +469,7 @@ public:
 
   void getRandomBytes(std::vector<uint8_t> &Bytes, uint32_t MinSize,
                       uint32_t MaxSize) {
-    uint32_t N = RandomEngine.get_uint32_t();
+    uint32_t N = cryptoutils->get_uint32_t();
     uint32_t Len;
 
     assert(MaxSize >= MinSize);
@@ -485,7 +481,7 @@ public:
     }
 
     char *Buffer = new char[Len];
-    RandomEngine.get_bytes(Buffer, Len);
+    cryptoutils->get_bytes(Buffer, Len);
     for (uint32_t i = 0; i < Len; ++i) {
       Bytes.push_back(static_cast<uint8_t>(Buffer[i]));
     }
@@ -526,24 +522,11 @@ public:
 };
 } // namespace llvm
 
-//
-// static void goron_decrypt_string(uint8_t *plain_string, const uint8_t *data)
-//{
-//  const uint8_t *key = data;
-//  uint32_t key_size = 1234;
-//  uint8_t *es = (uint8_t *) &data[key_size];
-//  uint32_t i;
-//  for (i = 0;i < 5678;i ++) {
-//    plain_string[i] = es[i] ^ key[i % key_size];
-//  }
-//}
-
 // 创建字符串加密
 ModulePass *llvm::createStringObfuscation() { return new StringObfuscation(); }
 ModulePass *llvm::createStringObfuscation(bool flag) {
   return new StringObfuscation(flag);
 }
 char StringObfuscation::ID = 0;
-INITIALIZE_PASS(StringObfuscation, "strobf", "Enable String Obfuscation",
-                false,
+INITIALIZE_PASS(StringObfuscation, "strobf", "Enable String Obfuscation", false,
                 false)
