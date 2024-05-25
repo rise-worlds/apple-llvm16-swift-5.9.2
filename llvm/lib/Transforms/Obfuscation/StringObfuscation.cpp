@@ -37,13 +37,14 @@ public:
   struct CSPEntry {
     CSPEntry()
         : ID(0), Offset(0), DecGV(nullptr), DecStatus(nullptr),
-          DecFunc(nullptr) {}
+          EncryptedStringTable(nullptr), DecFunc(nullptr) {}
     unsigned ID;
     unsigned Offset;
     GlobalVariable *DecGV;
     GlobalVariable *DecStatus; // is decrypted or not
     std::vector<uint8_t> Data;
     std::vector<uint8_t> EncKey;
+    GlobalVariable *EncryptedStringTable;
     Function *DecFunc;
   };
 
@@ -62,7 +63,7 @@ public:
   std::vector<CSPEntry *> ConstantStringPool;
   std::map<GlobalVariable *, CSPEntry *> CSPEntryMap;
   std::map<GlobalVariable *, CSUser *> CSUserMap;
-  GlobalVariable *EncryptedStringTable = nullptr;
+  // GlobalVariable *EncryptedStringTable = nullptr;
   std::set<GlobalVariable *> MaybeDeadGlobalVars;
 
   map<Function * /*Function*/, GlobalVariable * /*Decryption Status*/>
@@ -71,6 +72,20 @@ public:
   StringObfuscation(bool flag) : ModulePass(ID) {
     this->flag = flag;
     // EncryptedStringTable = new GlobalVariable;
+  }
+  bool doFinalization(Module &) override {
+    for (CSPEntry *Entry : ConstantStringPool) {
+      delete (Entry);
+    }
+    for (auto &I : CSUserMap) {
+      CSUser *User = I.second;
+      delete (User);
+    }
+    ConstantStringPool.clear();
+    CSPEntryMap.clear();
+    CSUserMap.clear();
+    MaybeDeadGlobalVars.clear();
+    return false;
   }
   StringRef getPassName() const override { return "StringObfuscation"; }
   static bool isRequired() { return true; } // 直接返回true即可
@@ -106,7 +121,7 @@ public:
               ConstantAggregateZero::get(CDS->getType());
           GlobalVariable *DecGV = new GlobalVariable(
               M, CDS->getType(), false, GlobalValue::PrivateLinkage, ZeroInit,
-              "dec" + Twine::utohexstr(Entry->ID) + GV.getName());
+              "dec_" + Twine::utohexstr(Entry->ID) + GV.getName());
           GlobalVariable *DecStatus = new GlobalVariable(
               M, Type::getInt32Ty(Ctx), false, GlobalValue::PrivateLinkage,
               Zero, "dec_status_" + Twine::utohexstr(Entry->ID) + GV.getName());
@@ -122,7 +137,7 @@ public:
 
     // encrypt those strings, build corresponding decrypt function
     for (CSPEntry *Entry : ConstantStringPool) {
-      getRandomBytes(Entry->EncKey, 16, 32);
+      getRandomBytes(Entry->EncKey, 8, 32);
       for (unsigned i = 0; i < Entry->Data.size(); ++i) {
         Entry->Data[i] ^= Entry->EncKey[i % Entry->EncKey.size()];
       }
@@ -154,21 +169,32 @@ public:
     std::vector<uint8_t> Data;
     std::vector<uint8_t> JunkBytes;
 
-    JunkBytes.reserve(32);
+    JunkBytes.reserve(16);
     for (CSPEntry *Entry : ConstantStringPool) {
+      Data.clear();
       JunkBytes.clear();
-      getRandomBytes(JunkBytes, 16, 32);
+      getRandomBytes(JunkBytes, 4, 16);
       Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
       Entry->Offset = static_cast<unsigned>(Data.size());
       Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
       Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
+      JunkBytes.clear();
+      getRandomBytes(JunkBytes, 4, 16);
+      Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
+      Constant *CDA =
+          ConstantDataArray::get(M.getContext(), ArrayRef<uint8_t>(Data));
+      string funcName = formatv("rise_encrypted_string_table_{0}",
+                                Twine::utohexstr(Entry->ID));
+      Entry->EncryptedStringTable = new GlobalVariable(
+          M, CDA->getType(), true, GlobalValue::PrivateLinkage, CDA, funcName);
     }
 
-    Constant *CDA =
-        ConstantDataArray::get(M.getContext(), ArrayRef<uint8_t>(Data));
-    EncryptedStringTable =
-        new GlobalVariable(M, CDA->getType(), true, GlobalValue::PrivateLinkage,
-                           CDA, "EncryptedStringTable");
+    // Constant *CDA =
+    //     ConstantDataArray::get(M.getContext(), ArrayRef<uint8_t>(Data));
+    // EncryptedStringTable =
+    //     new GlobalVariable(M, CDA->getType(), true,
+    //     GlobalValue::PrivateLinkage,
+    //                        CDA, "EncryptedStringTable");
 
     // decrypt string back at every use, change the plain string use to the
     // decrypted one
@@ -189,6 +215,9 @@ public:
     for (CSPEntry *Entry : ConstantStringPool) {
       if (Entry->DecFunc->use_empty()) {
         Entry->DecFunc->eraseFromParent();
+        Entry->DecGV->eraseFromParent();
+        Entry->DecStatus->eraseFromParent();
+        Entry->EncryptedStringTable->eraseFromParent();
       }
     }
     return Changed;
@@ -271,8 +300,8 @@ public:
                   Value *OutBuf =
                       IRB.CreateBitCast(Entry->DecGV, IRB.getInt8PtrTy());
                   Value *Data = IRB.CreateInBoundsGEP(
-                      EncryptedStringTable->getValueType(),
-                      EncryptedStringTable,
+                      Entry->EncryptedStringTable->getValueType(),
+                      Entry->EncryptedStringTable,
                       {IRB.getInt32(0), IRB.getInt32(Entry->Offset)});
                   IRB.CreateCall(Entry->DecFunc, {OutBuf, Data});
 
@@ -312,8 +341,8 @@ public:
                   Value *OutBuf =
                       IRB.CreateBitCast(Entry->DecGV, IRB.getInt8PtrTy());
                   Value *Data = IRB.CreateInBoundsGEP(
-                      EncryptedStringTable->getValueType(),
-                      EncryptedStringTable,
+                      Entry->EncryptedStringTable->getValueType(),
+                      Entry->EncryptedStringTable,
                       {IRB.getInt32(0), IRB.getInt32(Entry->Offset)});
                   IRB.CreateCall(Entry->DecFunc, {OutBuf, Data});
 
@@ -367,7 +396,7 @@ public:
         Type::getVoidTy(Ctx),
         {Type::getInt8PtrTy(Ctx), Type::getInt8PtrTy(Ctx)}, false);
     string funcName =
-        formatv("rise_decrypt_string_{0}", Twine::utohexstr(Entry->ID));
+        formatv("rise_decrypt_string_fun_{0}", Twine::utohexstr(Entry->ID));
     FunctionCallee callee = M->getOrInsertFunction(funcName, FuncTy);
     Function *DecFunc = cast<Function>(callee.getCallee());
     DecFunc->setCallingConv(CallingConv::C);
