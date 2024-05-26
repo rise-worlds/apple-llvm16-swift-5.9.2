@@ -15,6 +15,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
@@ -26,6 +27,13 @@
 #define DEBUG_TYPE "string-obfuscation"
 
 using namespace llvm;
+
+static cl::opt<uint32_t> ElementObfuscationProb(
+    "strobf_prob", cl::init(100), cl::NotHidden,
+    cl::desc("Choose the probability [%] each element of "
+             "ConstantDataSequential will be "
+             "obfuscated by the -strobf pass"));
+static uint32_t ElementObfuscationProbTemp = 100;
 
 using namespace std;
 namespace llvm {
@@ -253,6 +261,18 @@ public:
     if (!toObfuscate(flag, F, "strobf")) {
       return false;
     }
+    if (!toObfuscateUint32Option(F, "strobf_prob", &ElementObfuscationProbTemp))
+      ElementObfuscationProbTemp = ElementObfuscationProb;
+
+    // Check if the number of applications is correct
+    if (!((ElementObfuscationProbTemp > 0) &&
+          (ElementObfuscationProbTemp <= 100))) {
+      errs() << "StringObfuscation application element percentage "
+                "-strobf_prob=x must be 0 < x <= 100";
+      return false;
+    }
+    if (cryptoutils->get_range(100) >= ElementObfuscationProbTemp)
+      return false;
     LowerConstantExpr(*F);
     SmallPtrSet<GlobalVariable *, 16>
         DecryptedGV; // if GV has multiple use in a block, decrypt only at the
