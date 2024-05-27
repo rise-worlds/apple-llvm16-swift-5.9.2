@@ -29,6 +29,7 @@ static cl::opt<uint32_t> ObfTimes(
     cl::desc(
         "Choose how many time the FunctionWrapper pass loop on a CallSite"),
     cl::value_desc("Number of Times"), cl::init(2), cl::Optional);
+static uint32_t ObfTimesTemp = 2;
 
 namespace llvm {
 struct FunctionWrapper : public ModulePass {
@@ -55,9 +56,19 @@ struct FunctionWrapper : public ModulePass {
               callsites.emplace_back(new CallSite(&Inst));
       }
     }
-    for (CallSite *CS : callsites)
-      for (uint32_t i = 0; i < ObfTimes && CS != nullptr; i++)
+    for (CallSite *CS : callsites) {
+      Function *F = nullptr;
+      BasicBlock* BB = CS->getParent();
+      if (BB == nullptr)
+        continue;
+      F = BB->getParent();
+      if (F == nullptr)
+        continue;
+      if (!toObfuscateUint32Option(F, "fw_times", &ObfTimesTemp))
+        ObfTimesTemp = ObfTimes;
+      for (uint32_t i = 0; i < ObfTimesTemp && CS != nullptr; i++)
         CS = HandleCallSite(CS);
+    }
     return true;
   } // End of runOnModule
   CallSite *HandleCallSite(CallSite *CS) {
