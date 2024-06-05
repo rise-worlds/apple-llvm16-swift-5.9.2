@@ -9,6 +9,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include <set>
 #include <sstream>
@@ -16,6 +17,132 @@
 using namespace llvm;
 
 namespace llvm {
+
+    
+std::string ToString(const Module &M) {
+  std::error_code ec;
+  std::string out;
+  raw_string_ostream os(out);
+  M.print(os, nullptr);
+  return out;
+}
+
+std::string ToString(const Instruction &I) {
+  std::string out;
+  raw_string_ostream(out) << I;
+  return out;
+}
+
+std::string ToString(const BasicBlock &BB) {
+  std::string out;
+  raw_string_ostream os(out);
+  BB.printAsOperand(os, true);
+  return out;
+}
+
+std::string ToString(const Type &Ty) {
+  std::string out;
+  raw_string_ostream os(out);
+  os << TypeIDStr(Ty) << ": " << Ty;
+  return out;
+}
+
+std::string ToString(const Value &V) {
+  std::string out;
+  raw_string_ostream os(out);
+  os << ValueIDStr(V) << ": " << V;
+  return out;
+}
+
+std::string ToString(const MDNode &N) {
+  std::string out;
+  raw_string_ostream os(out);
+  N.printTree(os);
+  return out;
+}
+
+std::string TypeIDStr(const Type &Ty) {
+  switch (Ty.getTypeID()) {
+  case Type::TypeID::HalfTyID:
+    return "HalfTyID";
+  case Type::TypeID::BFloatTyID:
+    return "BFloatTyID";
+  case Type::TypeID::FloatTyID:
+    return "FloatTyID";
+  case Type::TypeID::DoubleTyID:
+    return "DoubleTyID";
+  case Type::TypeID::X86_FP80TyID:
+    return "X86_FP80TyID";
+  case Type::TypeID::FP128TyID:
+    return "FP128TyID";
+  case Type::TypeID::PPC_FP128TyID:
+    return "PPC_FP128TyID";
+  case Type::TypeID::VoidTyID:
+    return "VoidTyID";
+  case Type::TypeID::LabelTyID:
+    return "LabelTyID";
+  case Type::TypeID::MetadataTyID:
+    return "MetadataTyID";
+  case Type::TypeID::X86_MMXTyID:
+    return "X86_MMXTyID";
+  case Type::TypeID::X86_AMXTyID:
+    return "X86_AMXTyID";
+  case Type::TypeID::TokenTyID:
+    return "TokenTyID";
+  case Type::TypeID::IntegerTyID:
+    return "IntegerTyID";
+  case Type::TypeID::FunctionTyID:
+    return "FunctionTyID";
+  case Type::TypeID::PointerTyID:
+    return "PointerTyID";
+  case Type::TypeID::StructTyID:
+    return "StructTyID";
+  case Type::TypeID::ArrayTyID:
+    return "ArrayTyID";
+  case Type::TypeID::FixedVectorTyID:
+    return "FixedVectorTyID";
+  case Type::TypeID::ScalableVectorTyID:
+    return "ScalableVectorTyID";
+  }
+}
+
+std::string ValueIDStr(const Value &V) {
+
+#define HANDLE_VALUE(ValueName)                                                \
+  case Value::ValueTy::ValueName##Val:                                         \
+    return #ValueName;
+  // #define HANDLE_INSTRUCTION(Name)  /* nothing */
+  switch (V.getValueID()) {
+#include "llvm/IR/Value.def"
+  }
+
+#define HANDLE_INST(N, OPC, CLASS)                                             \
+  case N:                                                                      \
+    return #CLASS;
+  switch (V.getValueID() - Value::ValueTy::InstructionVal) {
+#include "llvm/IR/Instruction.def"
+#include <llvm/Support/FormatVariadic.h>
+  }
+  return std::to_string(V.getValueID());
+}
+
+size_t demotePHINode(Function &F) {
+  size_t count = 0;
+  std::vector<PHINode *> phiNodes;
+  do {
+    phiNodes.clear();
+    for (auto &BB : F) {
+      for (auto &I : BB.phis()) {
+        phiNodes.push_back(&I);
+      }
+    }
+    count += phiNodes.size();
+    for (PHINode *phi : phiNodes) {
+      DemotePHIToStack(phi, F.begin()->getTerminator());
+    }
+  } while (!phiNodes.empty());
+  return count;
+}
 
 // Shamefully borrowed from ../Scalar/RegToMem.cpp :(
 bool valueEscapes(Instruction *Inst) {
@@ -462,6 +589,17 @@ void llvm::LowerConstantExpr(Function &F) {
       }
     }
   }
+}
+
+void fatalError(const std::string &msg) { fatalError(msg.c_str()); }
+
+void fatalError(const char *msg) {
+  static LLVMContext Ctx;
+  Ctx.emitError(msg);
+
+  // emitError could return, so we make sure that we stop the execution
+  errs() << llvm::formatv("Error: {}", msg);
+  std::abort();
 }
 
 } // namespace llvm

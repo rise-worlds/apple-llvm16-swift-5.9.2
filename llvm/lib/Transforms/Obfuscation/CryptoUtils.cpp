@@ -46,10 +46,10 @@ std::uint_fast64_t CryptoUtils::get_raw() {
     prng_seed();
   return (*eng)();
 }
-uint32_t CryptoUtils::get_range(uint32_t min, uint32_t max) {
+uint64_t CryptoUtils::get_range(uint64_t min, uint64_t max) {
   if (max == 0)
     return 0;
-  std::uniform_int_distribution<uint32_t> dis(min, max - 1);
+  std::uniform_int_distribution<uint64_t> dis(min, max - 1);
   return dis(*eng);
 }
 void CryptoUtils::get_bytes(char* buffer, const int len) {

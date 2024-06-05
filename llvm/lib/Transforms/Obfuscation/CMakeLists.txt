@@ -15,7 +15,9 @@ add_llvm_component_library(LLVMObfuscation
         IndirectBranch.cpp
         FunctionWrapper.cpp
         ConstantEncryption.cpp
+        Metadata.cpp
         Obfuscation.cpp
+
         DEPENDS
         intrinsics_gen
 

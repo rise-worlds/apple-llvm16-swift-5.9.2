@@ -28,6 +28,10 @@
 
 namespace llvm {
 
+template <typename T>
+struct is_numeric
+    : std::integral_constant<bool, std::is_integral<T>::value> {};
+
 class CryptoUtils {
 public:
   CryptoUtils();
@@ -39,8 +43,9 @@ public:
     return static_cast<T>(num);
   };
   // Return a value in [0,max)
-  uint32_t get_range(uint32_t max) { return get_range(0, max); }
-  uint32_t get_range(uint32_t min, uint32_t max);
+  template <typename T, typename = std::enable_if_t<is_numeric<T>::value>>
+  T get_range(T max) { return get_range(0, max); }
+  uint64_t get_range(uint64_t min, uint64_t max);
   uint32_t get_uint32_t() { return get<uint32_t>(); };
   uint64_t get_uint64_t() { return get<uint64_t>(); };
   uint32_t get_uint8_t() { return get<uint8_t>(); };
@@ -54,6 +59,8 @@ public:
   uint32_t scramble32(uint32_t in,
                       std::map<uint32_t /*IDX*/, uint32_t /*VAL*/> &VMap);
   void get_bytes(char *buffer, const int len);
+
+  std::mt19937_64 *getEng() { return eng; }
 
 private:
   std::mt19937_64 *eng = nullptr;
