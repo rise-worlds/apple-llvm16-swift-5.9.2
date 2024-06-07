@@ -16,10 +16,10 @@
 using namespace llvm;
 
 static cl::opt<uint32_t>
-    ElementEncryptProb("strcry_prob", cl::init(100), cl::NotHidden,
+    ElementEncryptProb("strenc_prob", cl::init(100), cl::NotHidden,
                        cl::desc("Choose the probability [%] each element of "
                                 "ConstantDataSequential will be "
-                                "obfuscated by the -strcry pass"));
+                                "obfuscated by the -strenc pass"));
 static uint32_t ElementEncryptProbTemp = 100;
 
 namespace llvm {
@@ -66,7 +66,7 @@ struct StringEncryption : public ModulePass {
       if (toObfuscate(flag, &F, "strenc")) {
         errs() << "Running StringEncryption On " << F.getName() << "\n";
 
-        if (!toObfuscateUint32Option(&F, "strcry_prob",
+        if (!toObfuscateUint32Option(&F, "strenc_prob",
                                      &ElementEncryptProbTemp))
           ElementEncryptProbTemp = ElementEncryptProb;
 
@@ -74,7 +74,7 @@ struct StringEncryption : public ModulePass {
         if (!((ElementEncryptProbTemp > 0) &&
               (ElementEncryptProbTemp <= 100))) {
           errs() << "StringEncryption application element percentage "
-                    "-strcry_prob=x must be 0 < x <= 100";
+                    "-strenc_prob=x must be 0 < x <= 100";
           return false;
         }
         Constant *S =

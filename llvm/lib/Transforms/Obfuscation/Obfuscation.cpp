@@ -43,7 +43,7 @@ static cl::opt<bool> EnableFunctionCallObfuscate(
     "enable-fco", cl::init(false), cl::NotHidden,
     cl::desc("Enable Function CallSite Obfuscation."));
 static cl::opt<bool>
-    EnableStringEncryption("enable-strcry", cl::init(false), cl::NotHidden,
+    EnableStringEncryption("enable-strenc", cl::init(false), cl::NotHidden,
                            cl::desc("Enable String Encryption."));
 static cl::opt<bool>
     EnableConstantEncryption("enable-constenc", cl::init(false), cl::NotHidden,
@@ -72,7 +72,7 @@ static void LoadEnv(void) {
   if (getenv("FCO")) {
     EnableFunctionCallObfuscate = true;
   }
-  if (getenv("STRCRY")) {
+  if (getenv("STRENC")) {
     EnableStringEncryption = true;
   }
   if (getenv("INDIBRAN")) {
