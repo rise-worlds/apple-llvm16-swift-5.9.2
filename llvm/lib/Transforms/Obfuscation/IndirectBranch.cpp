@@ -8,11 +8,13 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
-#include "llvm/Transforms/Obfuscation/compat/LegacyLowerSwitch.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/LowerSwitch.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 using namespace llvm;
@@ -45,6 +47,12 @@ struct IndirectBranch : public FunctionPass {
   }
   StringRef getPassName() const override { return "IndirectBranch"; }
   bool initialize(Module &M) {
+    PassBuilder PB;
+    FunctionAnalysisManager FAM;
+    FunctionPassManager FPM;
+    PB.registerFunctionAnalyses(FAM);
+    FPM.addPass(LowerSwitchPass());
+
     SmallVector<Constant *, 32> BBs;
     unsigned long long i = 0;
     for (Function &F : M) {
@@ -54,7 +62,7 @@ struct IndirectBranch : public FunctionPass {
         UseStackTemp = UseStack;
 
       // See https://github.com/61bcdefg/Hikari-LLVM15/issues/32
-      createLegacyLowerSwitchPass()->runOnFunction(F);
+      FPM.run(F, FAM);
 
       if (!toObfuscateBoolOption(&F, "indibran_enc_jump_target",
                                  &EncryptJumpTargetTemp))
