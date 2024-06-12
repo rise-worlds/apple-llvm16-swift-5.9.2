@@ -4,10 +4,9 @@
 #include "llvm/Transforms/Obfuscation/Flattening.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Transforms/Obfuscation/CryptoUtils.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
-#include "llvm/Transforms/Utils/LowerSwitch.h"
+#include "llvm/Transforms/Obfuscation/compat/LegacyLowerSwitch.h"
 
 using namespace llvm;
 
@@ -51,12 +50,7 @@ void Flattening::flatten(Function *f) {
   std::map<uint32_t, uint32_t> scrambling_key;
   // END OF SCRAMBLER
 
-  PassBuilder PB;
-  FunctionAnalysisManager FAM;
-  FunctionPassManager FPM;
-  PB.registerFunctionAnalyses(FAM);
-  FPM.addPass(LowerSwitchPass());
-  FPM.run(*f, FAM);
+  createLegacyLowerSwitchPass()->runOnFunction(*f);
 
   for (BasicBlock &BB : *f) {
     if (BB.isEHPad() || BB.isLandingPad()) {

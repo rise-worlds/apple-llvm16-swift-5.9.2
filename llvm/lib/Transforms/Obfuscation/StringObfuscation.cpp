@@ -99,22 +99,20 @@ class StringObfuscation : public ModulePass {
         return false;
     }
     StringRef getPassName() const override { return "StringObfuscation"; }
-    static bool isRequired() { return true; } // 直接返回true即可
+    static bool isRequired() { return true; }
 
-    bool runOnModule(Module &M) override { // Pass实现函数
+    bool runOnModule(Module &M) override {
         errs() << "Running StringObfuscation flag: " << this->Flag << "\n";
 
         bool Changed = false;
         LLVMContext &Ctx = M.getContext();
         ConstantInt *Zero = ConstantInt::get(Type::getInt32Ty(Ctx), 0);
         for (Function &F : M) {
-            FixFunctionConstantExpr(&F);
-            demotePHINode(F);
             std::string demangled = demangle(F.getName().str());
             errs() << "[StringObfuscation] " << demangled << "\n";
 
             if (!toObfuscate(Flag, &F, "strobf")) {
-                errs() << "StringObfuscation off, fun: " << demangled << ", flag: " << this->Flag << "\n";
+                errs() << "[StringObfuscation] off, fun: " << demangled << ", flag: " << this->Flag << "\n";
                 continue;
             }
             if (!toObfuscateUint32Option(&F, "strobf_prob", &ElementObfuscationProbTemp))
@@ -122,13 +120,13 @@ class StringObfuscation : public ModulePass {
 
             // Check if the number of applications is correct
             if (!((ElementObfuscationProbTemp > 0) && (ElementObfuscationProbTemp <= 100))) {
-                errs() << "StringObfuscation application element percentage "
+                errs() << "[StringObfuscation] application element percentage "
                           "-strobf_prob=x must be 0 < x <= 100\n";
                 continue;
             }
             uint32_t ProbTemp = cryptoutils->get_range(100);
             if (ProbTemp > ElementObfuscationProbTemp) {
-                errs() << "StringObfuscation off, fun: " << demangled << ", " << ProbTemp << "<=" << ElementObfuscationProbTemp << "\n";
+                errs() << "[StringObfuscation] off, fun: " << demangled << ", " << ProbTemp << "<=" << ElementObfuscationProbTemp << "\n";
                 continue;
             }
 
@@ -138,7 +136,7 @@ class StringObfuscation : public ModulePass {
             for (BasicBlock &BB : F) {
                 for (Instruction &I : BB) {
                     if (isa<PHINode>(I)) {
-                        errs() << demangled << " contains Phi node which could raise issues!\n";
+                        errs() << "[StringObfuscation] " << demangled << " contains Phi node which could raise issues !\n ";
                         continue;
                     }
 
@@ -250,11 +248,11 @@ class StringObfuscation : public ModulePass {
 
                                     for (size_t i = 0; i < StrSize; ++i) {
                                         size_t j = indexes[i];
-                                        // Access char in EncPtr[i]
+                                        // Access the char in EncPtr[i]
                                         Value *encGEP = IRB.CreateGEP(IRB.getInt8Ty(), IRB.CreatePointerCast(EncPtr, IRB.getInt8PtrTy()),
                                                                       IRB.getInt32(j));
 
-                                        // Load encoded char
+                                        // Load the encoded char
                                         LoadInst *encVal = IRB.CreateLoad(IRB.getInt8Ty(), encGEP);
                                         addMetadata(*encVal, MetaObf(PROTECT_FIELD_ACCESS));
 
@@ -277,7 +275,7 @@ class StringObfuscation : public ModulePass {
                                             addMetadata(*Op, MetaObf(OPAQUE_OP, 2llu));
                                         }
 
-                                        // Store value
+                                        // Store the value
                                         StoreInst *storeClear = IRB.CreateStore(decVal, decodedGEP, /* volatile */ true);
                                         addMetadata(*storeClear, MetaObf(PROTECT_FIELD_ACCESS));
                                     }
