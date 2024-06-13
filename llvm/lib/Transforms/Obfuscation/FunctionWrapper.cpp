@@ -90,6 +90,11 @@ struct FunctionWrapper : public ModulePass {
       return nullptr;
     SmallVector<unsigned int, 8> byvalArgNums;
     if (Function *tmp = dyn_cast<Function>(calledFunction)) {
+      if (tmp->getName().startswith("rise_decrypt_fun_") 
+          || tmp->getName().startswith("__global_variable_initializer__")) {
+        // StringObfuscation Intrinsic
+        return nullptr;
+      }
       if (tmp->getName().startswith("clang.")) {
         // Clang Intrinsic
         return nullptr;
