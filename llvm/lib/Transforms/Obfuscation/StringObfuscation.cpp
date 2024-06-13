@@ -41,6 +41,20 @@ static uint32_t ElementObfuscationProbTemp = 100;
 using namespace std;
 namespace llvm {
 
+GlobalVariable *extractGlobalVariable(ConstantExpr *Expr) {
+    while (Expr) {
+        if (Expr->getOpcode() == llvm::Instruction::IntToPtr || llvm::Instruction::isBinaryOp(Expr->getOpcode())) {
+            Expr = dyn_cast<ConstantExpr>(Expr->getOperand(0));
+        } else if (Expr->getOpcode() == llvm::Instruction::PtrToInt || Expr->getOpcode() == llvm::Instruction::GetElementPtr) {
+            return dyn_cast<GlobalVariable>(Expr->getOperand(0));
+        } else {
+            break;
+        }
+    }
+
+    return nullptr;
+}
+
 class StringObfuscation : public ModulePass {
   public:
     static char ID;
@@ -141,15 +155,34 @@ class StringObfuscation : public ModulePass {
                         GlobalVariable *G = dyn_cast<GlobalVariable>(Op->stripPointerCasts());
 
                         if (!G)
+                            if (auto *CE = dyn_cast<ConstantExpr>(Op))
+                                G = extractGlobalVariable(CE);
+
+                        auto IsInitializerConstantExpr = [](const GlobalVariable &G) {
+                            return (!G.isExternallyInitialized() && G.hasInitializer()) && isa<ConstantExpr>(G.getInitializer());
+                        };
+
+                        Use *ActualOp = &Op;
+                        bool MaybeStringInCEInitializer = false;
+                        if (G && IsInitializerConstantExpr(*G)) {
+                            // Is the global initializer part of a constant expression?
+                            G = extractGlobalVariable(cast<ConstantExpr>(G->getInitializer()));
+                            if (G) {
+                                ActualOp = G->getSingleUndroppableUse();
+                                MaybeStringInCEInitializer = true;
+                            }
+                        }
+
+                        if (!G || !ActualOp)
                             continue;
 
+                        if (G->isNullValue() || G->isZeroValue()) {
+                            continue;
+                        }
                         if (!(G->isConstant() && G->hasInitializer())) {
                             continue;
                         }
                         if (G->hasDLLExportStorageClass() || G->isDLLImportDependent()) {
-                            continue;
-                        }
-                        if (G->isNullValue() || G->isZeroValue()) {
                             continue;
                         }
                         if (G->getSection().startswith("llvm.")) {
@@ -182,11 +215,19 @@ class StringObfuscation : public ModulePass {
 
                             if (StrSize > 10) {
                                 CSPEntry *Entry = new CSPEntry();
-                                getRandomBytes(Entry->EncKey, 8, 16);
-                                int EncKeySize = Entry->EncKey.size();
-                                Entry->Data.reserve(StrSize);
-                                for (unsigned I = 0; I < StrSize; ++I) {
-                                    Entry->Data.push_back(static_cast<uint8_t>(str[I]) ^ Entry->EncKey[I % EncKeySize]);
+                                std::vector<uint8_t> encKey;
+                                getRandomBytes(encKey, 8, 16);
+                                int EncKeySize = encKey.size();
+                                // getRandomBytes(Entry->EncKey, 8, 16);
+                                // int EncKeySize = Entry->EncKey.size();
+                                Entry->KeySize = EncKeySize;
+                                Entry->EncKey.reserve(EncKeySize);
+                                Entry->Data.resize(StrSize);
+                                std::vector<uint8_t> encoded(StrSize);
+                                for (size_t I = 0; I < StrSize; ++I) {
+                                    // encoded[I] = static_cast<uint16_t>(str[I]) ^ static_cast<uint16_t>(Entry->EncKey[I % EncKeySize]);
+                                    // Entry->Data.push_back(static_cast<uint8_t>(str[I]) ^ Entry->EncKey[I % EncKeySize]);
+                                    encoded[I] = static_cast<uint8_t>(str[I]) ^ static_cast<uint8_t>(encKey[I % EncKeySize]);
                                 }
                                 Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
                                 Entry->Salt = cryptoutils->get_range(0xffff);
@@ -204,8 +245,10 @@ class StringObfuscation : public ModulePass {
                                 getRandomBytes(JunkBytes, 4, 16);
                                 Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
                                 Entry->Offset = static_cast<unsigned>(Data.size());
-                                Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
-                                Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
+                                // Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
+                                // Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
+                                Data.insert(Data.end(), encKey.begin(), encKey.end());
+                                Data.insert(Data.end(), encoded.begin(), encoded.end());
                                 JunkBytes.clear();
                                 getRandomBytes(JunkBytes, 2, 8);
                                 Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
