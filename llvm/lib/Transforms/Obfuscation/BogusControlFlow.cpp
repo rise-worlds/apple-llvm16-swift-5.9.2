@@ -92,6 +92,7 @@
 //===----------------------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Obfuscation/BogusControlFlow.h"
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -239,7 +240,7 @@ struct BogusControlFlow : public FunctionPass {
     // If fla annotations
     if (toObfuscate(flag, &F, "bcf") && !F.isPresplitCoroutine() &&
         !readAnnotationMetadata(&F, "bcfopfunc")) {
-      errs() << "Running BogusControlFlow On " << F.getName() << "\n";
+      errs() << "Running BogusControlFlow On " << demangle(F.getName().str()) << "\n";
       bogus(F);
       doF(F);
     }

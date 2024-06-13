@@ -3,6 +3,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Obfuscation/FunctionWrapper.h"
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -44,7 +45,7 @@ struct FunctionWrapper : public ModulePass {
       if (F.getName().startswith("rise_decrypt_fun_") || F.getName().startswith("__global_variable_initializer__"))
         continue;
       if (toObfuscate(flag, &F, "fw")) {
-        errs() << "Running FunctionWrapper On " << F.getName() << "\n";
+        errs() << "Running FunctionWrapper On " << demangle(F.getName().str()) << "\n";
         if (!toObfuscateUint32Option(&F, "fw_prob", &ProbRateTemp))
           ProbRateTemp = ProbRate;
         if (ProbRateTemp > 100) {
