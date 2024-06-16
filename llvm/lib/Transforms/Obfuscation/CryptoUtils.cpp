@@ -42,8 +42,8 @@ std::uint_fast64_t CryptoUtils::get_raw() {
     return (*eng)();
 }
 uint64_t CryptoUtils::get_range(uint64_t min, uint64_t max) {
-    if (max == 0)
-        return 0;
+    if (max < min)
+        std::swap(min, max);
     std::uniform_int_distribution<uint64_t> dis(min, max - 1);
     return dis(*eng);
 }

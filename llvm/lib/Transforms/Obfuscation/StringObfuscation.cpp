@@ -6,6 +6,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "llvm/ADT/Statistic.h"
@@ -39,6 +40,7 @@ static cl::opt<uint32_t> ElementObfuscationProb("strobf_prob", cl::init(100), cl
 static uint32_t ElementObfuscationProbTemp = 100;
 
 using namespace std;
+
 namespace llvm {
 
 GlobalVariable *extractGlobalVariable(ConstantExpr *Expr) {
@@ -60,18 +62,24 @@ class StringObfuscation : public ModulePass {
     static char ID;
     bool Flag;
     struct CSPEntry {
-        CSPEntry()
-            : ID(0), Salt(0), DecGV(nullptr), DecStatus(nullptr), EncryptedStringTable(nullptr), Offset(0), KeySize(0), DecFunc(nullptr) {}
-        unsigned ID;
-        uint16_t Salt;
-        GlobalVariable *DecGV;
-        GlobalVariable *DecStatus; // is decrypted or not
-        std::vector<uint8_t> Data;
+        CSPEntry() = default;
+
+        unsigned ID = 0;
+        uint16_t Salt = 0;
+        std::string OriginString;
+        uint16_t OriginType = 0;
+
+        GlobalVariable *DecGV = nullptr;
+        GlobalVariable *DecStatus = nullptr; // is decrypted or not
+        std::vector<uint8_t> EncData;
         std::vector<uint8_t> EncKey;
-        GlobalVariable *EncryptedStringTable;
-        unsigned Offset;
-        unsigned KeySize;
-        Function *DecFunc;
+        GlobalVariable *EncryptedStringTable = nullptr;
+        unsigned Offset = 0;
+        unsigned EncKeySize = 0;
+        Function *DecFunc = nullptr;
+
+        AllocaInst *DecLV = nullptr;
+        GlobalVariable *OriginGV = nullptr;
     };
 
     struct CSUser {
@@ -86,6 +94,7 @@ class StringObfuscation : public ModulePass {
     };
 
     std::vector<CSPEntry *> ConstantStringPool;
+    std::unordered_map<std::string, CSPEntry *> ConstantStringMap;
     std::map<GlobalVariable *, CSPEntry *> CSPEntryMap;
     std::map<GlobalVariable *, CSUser *> CSUserMap;
     // GlobalVariable *EncryptedStringTable = nullptr;
@@ -117,6 +126,7 @@ class StringObfuscation : public ModulePass {
         errs() << "Running StringObfuscation flag: " << this->Flag << "\n";
 
         bool Changed = false;
+        std::unordered_map<std::string, bool> function_obf_map;
         LLVMContext &Ctx = M.getContext();
         ConstantInt *Zero = ConstantInt::get(Type::getInt32Ty(Ctx), 0);
         for (Function &F : M) {
@@ -124,7 +134,7 @@ class StringObfuscation : public ModulePass {
             errs() << "[StringObfuscation] " << demangled << "\n";
 
             if (!toObfuscate(Flag, &F, "strobf")) {
-                errs() << "[StringObfuscation] off, fun: " << demangled << ", flag: " << this->Flag << "\n";
+                // errs() << "[StringObfuscation] off, fun: " << demangled << ", flag: " << this->Flag << "\n";
                 continue;
             }
             if (!toObfuscateUint32Option(&F, "strobf_prob", &ElementObfuscationProbTemp))
@@ -132,8 +142,8 @@ class StringObfuscation : public ModulePass {
 
             // Check if the number of applications is correct
             if (!((ElementObfuscationProbTemp > 0) && (ElementObfuscationProbTemp <= 100))) {
-                errs() << "[StringObfuscation] application element percentage "
-                          "-strobf_prob=x must be 0 < x <= 100\n";
+                errs() << "[StringObfuscation] application element percentage, fun: " << demangled
+                       << ", -strobf_prob=x must be 0 < x <= 100\n";
                 continue;
             }
             uint32_t ProbTemp = cryptoutils->get_range(100);
@@ -143,38 +153,43 @@ class StringObfuscation : public ModulePass {
             }
 
             FixFunctionConstantExpr(&F);
-            std::set<User *> Users;
+            Instruction *begin_ins = nullptr;
             for (BasicBlock &BB : F) {
                 for (Instruction &I : BB) {
                     if (isa<PHINode>(I)) {
                         errs() << "[StringObfuscation] " << demangled << " contains Phi node which could raise issues !\n ";
                         continue;
                     }
+                    if (begin_ins == nullptr) {
+                        begin_ins = &I;
+                    }
 
                     for (Use &Op : I.operands()) {
                         GlobalVariable *G = dyn_cast<GlobalVariable>(Op->stripPointerCasts());
 
                         if (!G)
-                            if (auto *CE = dyn_cast<ConstantExpr>(Op))
-                                G = extractGlobalVariable(CE);
-
-                        auto IsInitializerConstantExpr = [](const GlobalVariable &G) {
-                            return (!G.isExternallyInitialized() && G.hasInitializer()) && isa<ConstantExpr>(G.getInitializer());
-                        };
-
-                        Use *ActualOp = &Op;
-                        bool MaybeStringInCEInitializer = false;
-                        if (G && IsInitializerConstantExpr(*G)) {
-                            // Is the global initializer part of a constant expression?
-                            G = extractGlobalVariable(cast<ConstantExpr>(G->getInitializer()));
-                            if (G) {
-                                ActualOp = G->getSingleUndroppableUse();
-                                MaybeStringInCEInitializer = true;
-                            }
-                        }
-
-                        if (!G || !ActualOp)
                             continue;
+                        // if (!G)
+                        //     if (auto *CE = dyn_cast<ConstantExpr>(Op))
+                        //         G = extractGlobalVariable(CE);
+                        //
+                        // auto IsInitializerConstantExpr = [](const GlobalVariable &G) {
+                        //     return (!G.isExternallyInitialized() && G.hasInitializer()) && isa<ConstantExpr>(G.getInitializer());
+                        // };
+                        //
+                        // Use *ActualOp = &Op;
+                        // bool MaybeStringInCEInitializer = false;
+                        // if (G && IsInitializerConstantExpr(*G)) {
+                        //     // Is the global initializer part of a constant expression?
+                        //     G = extractGlobalVariable(cast<ConstantExpr>(G->getInitializer()));
+                        //     if (G) {
+                        //         ActualOp = G->getSingleUndroppableUse();
+                        //         MaybeStringInCEInitializer = true;
+                        //     }
+                        // }
+                        //
+                        // if (!G || !ActualOp)
+                        //     continue;
 
                         if (G->isNullValue() || G->isZeroValue()) {
                             continue;
@@ -209,82 +224,103 @@ class StringObfuscation : public ModulePass {
 
                         IntegerType *intType = cast<IntegerType>(memberType);
                         if (intType == Type::getInt8Ty(G->getParent()->getContext())) {
-                            StringRef str = data->getRawDataValues();
-                            size_t StrSize = str.size();
-                            errs() << "[StringObfuscation] " << demangled << ": " << str << "\n";
+                            // std::string str = data->getRawDataValues().str();
+                            // size_t StrSize = str.size();
+                            // errs() << "[StringObfuscation] " << demangled << ": " << str << "\n";
+                            size_t StrSize = data->getElementByteSize();
+                            std::string str;
+                            str.resize(StrSize);
+                            for (unsigned i = 0; i < data->getNumElements(); i++) {
+                                const uint32_t V = data->getElementAsInteger(i);
+                                str[i] = V;
+                            }
 
-                            if (StrSize > 10) {
-                                CSPEntry *Entry = new CSPEntry();
-                                std::vector<uint8_t> encKey;
-                                getRandomBytes(encKey, 8, 16);
-                                int EncKeySize = encKey.size();
-                                // getRandomBytes(Entry->EncKey, 8, 16);
-                                // int EncKeySize = Entry->EncKey.size();
-                                Entry->KeySize = EncKeySize;
-                                Entry->EncKey.reserve(EncKeySize);
-                                Entry->Data.resize(StrSize);
-                                std::vector<uint8_t> encoded(StrSize);
-                                for (size_t I = 0; I < StrSize; ++I) {
-                                    // encoded[I] = static_cast<uint16_t>(str[I]) ^ static_cast<uint16_t>(Entry->EncKey[I % EncKeySize]);
-                                    // Entry->Data.push_back(static_cast<uint8_t>(str[I]) ^ Entry->EncKey[I % EncKeySize]);
-                                    encoded[I] = static_cast<uint8_t>(str[I]) ^ static_cast<uint8_t>(encKey[I % EncKeySize]);
+                            const auto &it = ConstantStringMap.find(str);
+                            if (it != ConstantStringMap.end()) {
+                                // if string has already been processed, replace it with the processed value
+                                if (StrSize <= 10) {
+                                    I.setOperand(Op.getOperandNo(), it->second->DecLV);
+                                } else {
+                                    I.replaceUsesOfWith(G, it->second->DecGV);
                                 }
-                                Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
-                                Entry->Salt = cryptoutils->get_range(0xffff);
+                            } else if (StrSize > 10) {
+                                CSPEntry *pEntry = new CSPEntry();
+                                pEntry->ID = static_cast<unsigned>(ConstantStringPool.size());
+                                pEntry->Salt = cryptoutils->get_range(0xffff);
+                                pEntry->OriginGV = G;
+                                pEntry->OriginString = str;
+                                pEntry->OriginType = 8;
+                                pEntry->EncKeySize = cryptoutils->get_range(8, 16);
+                                pEntry->EncKey.resize(pEntry->EncKeySize);
+                                std::generate(std::begin(pEntry->EncKey), std::end(pEntry->EncKey),
+                                              []() { return cryptoutils->get_range(1, std::numeric_limits<uint8_t>::max()); });
+                                pEntry->EncData.resize(StrSize);
+                                for (size_t I = 0; I < StrSize; ++I) {
+                                    pEntry->EncData[I] =
+                                        static_cast<uint8_t>(str[I]) ^ static_cast<uint8_t>(pEntry->EncKey[I % pEntry->EncKeySize]);
+                                }
                                 ConstantAggregateZero *ZeroInit = ConstantAggregateZero::get(data->getType());
-                                string DecName = formatv("rise_dec_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
-                                                         Twine::utohexstr(Entry->Salt));
+                                string DecName = formatv("rise_dec_{0}_{1}_{2}", G->getName(), Twine::utohexstr(pEntry->ID),
+                                                         Twine::utohexstr(pEntry->Salt));
                                 GlobalVariable *DecGV =
                                     new GlobalVariable(M, data->getType(), false, GlobalValue::PrivateLinkage, ZeroInit, DecName);
                                 DecGV->setAlignment(MaybeAlign(G->getAlignment()));
-                                Entry->DecGV = DecGV;
+                                pEntry->DecGV = DecGV;
 
                                 std::vector<uint8_t> Data;
                                 std::vector<uint8_t> JunkBytes;
                                 JunkBytes.reserve(16);
                                 getRandomBytes(JunkBytes, 4, 16);
                                 Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
-                                Entry->Offset = static_cast<unsigned>(Data.size());
-                                // Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
-                                // Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
-                                Data.insert(Data.end(), encKey.begin(), encKey.end());
-                                Data.insert(Data.end(), encoded.begin(), encoded.end());
+                                pEntry->Offset = static_cast<unsigned>(Data.size());
+                                Data.insert(Data.end(), pEntry->EncKey.begin(), pEntry->EncKey.end());
+                                Data.insert(Data.end(), pEntry->EncData.begin(), pEntry->EncData.end());
                                 JunkBytes.clear();
                                 getRandomBytes(JunkBytes, 2, 8);
                                 Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
                                 Constant *CDA = ConstantDataArray::get(Ctx, ArrayRef<uint8_t>(Data));
-                                string encStringName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
-                                                               Twine::utohexstr(Entry->Salt));
-                                Entry->EncryptedStringTable =
-                                    new GlobalVariable(M, CDA->getType(), true, GlobalValue::PrivateLinkage, CDA, encStringName);
-                                ConstantStringPool.push_back(Entry);
+                                string EncName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(pEntry->ID),
+                                                         Twine::utohexstr(pEntry->Salt));
+                                pEntry->EncryptedStringTable =
+                                    new GlobalVariable(M, CDA->getType(), true, GlobalValue::PrivateLinkage, CDA, EncName);
+                                ConstantStringPool.push_back(pEntry);
+                                ConstantStringMap.emplace(str, pEntry);
                                 I.replaceUsesOfWith(G, DecGV);
-                                if (G->use_empty()) {
-                                    G->eraseFromParent();
-                                }
+                                // if (G->use_empty()) {
+                                //     G->eraseFromParent();
+                                // }
                             } else {
-                                std::vector<uint8_t> key(StrSize);
-                                std::generate(std::begin(key), std::end(key),
-                                              []() { return cryptoutils->get_range(1, std::numeric_limits<uint8_t>::max() - 1); });
-                                int temp = cryptoutils->get_range(0xffff);
+                                CSPEntry *pEntry = new CSPEntry();
+                                pEntry->ID = static_cast<unsigned>(ConstantStringPool.size());
+                                pEntry->Salt = cryptoutils->get_range(0xffff);
+                                pEntry->OriginGV = G;
+                                pEntry->OriginString = str;
+                                pEntry->OriginType = 8;
+                                pEntry->EncKey.resize(StrSize);
+                                std::generate(std::begin(pEntry->EncKey), std::end(pEntry->EncKey),
+                                              []() { return cryptoutils->get_range(1, std::numeric_limits<uint8_t>::max()); });
 
-                                std::vector<uint8_t> encoded(str.size());
-                                for (size_t i = 0; i < str.size(); ++i) {
-                                    encoded[i] = static_cast<uint8_t>(str[i]) ^ static_cast<uint8_t>(key[i]);
+                                pEntry->EncData.resize(StrSize);
+                                for (size_t i = 0; i < StrSize; ++i) {
+                                    pEntry->EncData[i] = static_cast<uint8_t>(str[i]) ^ static_cast<uint8_t>(pEntry->EncKey[i]);
                                 }
-                                string EncName = formatv("rise_enc_{0}_{1}", G->getName(), Twine::utohexstr(temp));
-                                Constant *StrEnc = ConstantDataArray::get(BB.getContext(), ArrayRef<uint8_t>(encoded));
+                                string EncName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(pEntry->ID),
+                                                         Twine::utohexstr(pEntry->Salt));
+                                Constant *StrEnc = ConstantDataArray::get(BB.getContext(), ArrayRef<uint8_t>(pEntry->EncData));
                                 GlobalVariable *pEnc =
                                     new GlobalVariable(M, StrEnc->getType(), true, GlobalValue::PrivateLinkage, StrEnc, EncName);
-                                G->replaceAllUsesWith(pEnc);
+                                // G->replaceAllUsesWith(pEnc);
+                                pEntry->EncryptedStringTable = pEnc;
+                                ConstantStringMap.emplace(str, pEntry);
 
-                                IRBuilder<NoFolder> IRB(&BB);
-                                IRB.SetInsertPoint(&I);
+                                IRBuilder<NoFolder> IRB(begin_ins);
                                 Use &EncPtr = Op;
 
                                 // Allocate a buffer on the stack that contains the decoded string
-                                string DecName = formatv("rise_dec_{0}_{1}", G->getName(), Twine::utohexstr(temp));
+                                string DecName = formatv("rise_dec_{0}_{1}_{2}", G->getName(), Twine::utohexstr(pEntry->ID),
+                                                         Twine::utohexstr(pEntry->Salt));
                                 AllocaInst *clearBuffer = IRB.CreateAlloca(IRB.getInt8Ty(), IRB.getInt32(StrSize), DecName);
+                                pEntry->DecLV = clearBuffer;
 
                                 llvm::SmallVector<size_t, 20> indexes(StrSize);
                                 for (size_t i = 0; i < indexes.size(); ++i) {
@@ -303,9 +339,9 @@ class StringObfuscation : public ModulePass {
                                     addMetadata(*encVal, MetaObf(PROTECT_FIELD_ACCESS));
 
                                     Value *decodedGEP = IRB.CreateGEP(IRB.getInt8Ty(), clearBuffer, IRB.getInt32(j));
-                                    StoreInst *storeKey = IRB.CreateStore(ConstantInt::get(IRB.getInt8Ty(), (key)[j]), decodedGEP,
-                                                                          /* volatile */ true);
-
+                                    StoreInst *storeKey =
+                                        IRB.CreateStore(ConstantInt::get(IRB.getInt8Ty(), (pEntry->EncKey)[j]), decodedGEP,
+                                                        /* volatile */ true);
                                     addMetadata(*storeKey, {
                                                                MetaObf(PROTECT_FIELD_ACCESS),
                                                                MetaObf(OPAQUE_CST),
@@ -327,280 +363,304 @@ class StringObfuscation : public ModulePass {
                                 }
 
                                 I.setOperand(Op.getOperandNo(), clearBuffer);
-                                if (G->use_empty()) {
-                                    G->removeFromParent();
-                                }
-                            }
-
-                            Changed |= true;
-                        } else if (intType == Type::getInt16Ty(G->getParent()->getContext())) {
-                            std::vector<uint16_t> str;
-                            for (unsigned i = 0; i < data->getNumElements(); i++) {
-                                const uint64_t V = data->getElementAsInteger(i);
-                                str.emplace_back(V);
-                            }
-                            size_t StrSize = str.size();
-
-                            if (StrSize > 10) {
-                                CSPEntry *Entry = new CSPEntry();
-
-                                std::vector<uint16_t> encKey;
-                                getRandomBytes(encKey, 8, 16);
-                                int EncKeySize = encKey.size();
-                                // Entry->Data.reserve(StrSize);
-                                // for (unsigned I = 0; I < StrSize; ++I) {
-                                //     Entry->Data.push_back(static_cast<uint16_t>(str[I]) ^ Entry->EncKey[I % EncKeySize]);
+                                // if (G->use_empty()) {
+                                //     G->removeFromParent();
                                 // }
-                                Entry->KeySize = EncKeySize;
-                                Entry->EncKey.resize(EncKeySize);
-                                Entry->Data.resize(StrSize);
-                                std::vector<uint16_t> encoded(StrSize);
-                                for (size_t I = 0; I < StrSize; ++I) {
-                                    // encoded[I] = static_cast<uint16_t>(str[I]) ^ static_cast<uint16_t>(Entry->EncKey[I % EncKeySize]);
-                                    encoded[I] = static_cast<uint16_t>(str[I]) ^ static_cast<uint16_t>(encKey[I % EncKeySize]);
-                                }
-                                Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
-                                Entry->Salt = cryptoutils->get_range(0xffff);
-                                ConstantAggregateZero *ZeroInit = ConstantAggregateZero::get(data->getType());
-                                string DecName = formatv("rise_dec_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
-                                                         Twine::utohexstr(Entry->Salt));
-                                GlobalVariable *DecGV =
-                                    new GlobalVariable(M, data->getType(), false, GlobalValue::PrivateLinkage, ZeroInit, DecName);
-                                DecGV->setAlignment(MaybeAlign(G->getAlignment()));
-                                Entry->DecGV = DecGV;
-
-                                std::vector<uint16_t> Data;
-                                std::vector<uint16_t> JunkBytes;
-                                JunkBytes.reserve(16);
-                                getRandomBytes(JunkBytes, 4, 16);
-                                Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
-                                Entry->Offset = static_cast<unsigned>(Data.size());
-                                // Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
-                                // Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
-                                Data.insert(Data.end(), encKey.begin(), encKey.end());
-                                Data.insert(Data.end(), encoded.begin(), encoded.end());
-                                JunkBytes.clear();
-                                getRandomBytes(JunkBytes, 2, 8);
-                                Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
-                                Constant *CDA = ConstantDataArray::get(Ctx, ArrayRef<uint16_t>(Data));
-                                string encStringName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
-                                                               Twine::utohexstr(Entry->Salt));
-                                Entry->EncryptedStringTable =
-                                    new GlobalVariable(M, CDA->getType(), true, GlobalValue::PrivateLinkage, CDA, encStringName);
-                                ConstantStringPool.push_back(Entry);
-                                I.replaceUsesOfWith(G, DecGV);
-                                if (G->use_empty()) {
-                                    G->eraseFromParent();
-                                }
-                            } else {
-                                std::vector<uint16_t> key(StrSize);
-                                std::generate(std::begin(key), std::end(key),
-                                              []() { return cryptoutils->get_range(1, std::numeric_limits<uint16_t>::max() - 1); });
-                                int temp = cryptoutils->get_range(0xffff);
-
-                                std::vector<uint16_t> encoded(str.size());
-                                for (size_t i = 0; i < str.size(); ++i) {
-                                    encoded[i] = static_cast<uint16_t>(str[i]) ^ static_cast<uint16_t>(key[i]);
-                                }
-                                string EncName = formatv("rise_enc_{0}_{1}", G->getName(), Twine::utohexstr(temp));
-                                Constant *StrEnc = ConstantDataArray::get(BB.getContext(), ArrayRef<uint16_t>(encoded));
-                                GlobalVariable *pEnc =
-                                    new GlobalVariable(M, StrEnc->getType(), true, GlobalValue::PrivateLinkage, StrEnc, EncName);
-                                G->replaceAllUsesWith(pEnc);
-
-                                IRBuilder<NoFolder> IRB(&BB);
-                                IRB.SetInsertPoint(&I);
-                                Use &EncPtr = Op;
-
-                                // Allocate a buffer on the stack that contains the decoded string
-                                string DecName = formatv("rise_dec_{0}_{1}", G->getName(), Twine::utohexstr(temp));
-                                AllocaInst *clearBuffer = IRB.CreateAlloca(IRB.getInt16Ty(), IRB.getInt32(StrSize), DecName);
-
-                                llvm::SmallVector<size_t, 20> indexes(StrSize);
-                                for (size_t i = 0; i < indexes.size(); ++i) {
-                                    indexes[i] = i;
-                                }
-                                std::shuffle(indexes.begin(), indexes.end(), *cryptoutils->getEng());
-
-                                for (size_t i = 0; i < StrSize; ++i) {
-                                    size_t j = indexes[i];
-                                    // Access the char in EncPtr[i]
-                                    Value *encGEP =
-                                        IRB.CreateGEP(IRB.getInt16Ty(), IRB.CreatePointerCast(EncPtr, IRB.getInt8PtrTy()), IRB.getInt32(j));
-
-                                    // Load the encoded char
-                                    LoadInst *encVal = IRB.CreateLoad(IRB.getInt16Ty(), encGEP);
-                                    addMetadata(*encVal, MetaObf(PROTECT_FIELD_ACCESS));
-
-                                    Value *decodedGEP = IRB.CreateGEP(IRB.getInt16Ty(), clearBuffer, IRB.getInt32(j));
-                                    StoreInst *storeKey = IRB.CreateStore(ConstantInt::get(IRB.getInt16Ty(), (key)[j]), decodedGEP,
-                                                                          /* volatile */ true);
-
-                                    addMetadata(*storeKey, {
-                                                               MetaObf(PROTECT_FIELD_ACCESS),
-                                                               MetaObf(OPAQUE_CST),
-                                                           });
-
-                                    LoadInst *keyVal = IRB.CreateLoad(IRB.getInt16Ty(), decodedGEP);
-                                    addMetadata(*keyVal, MetaObf(PROTECT_FIELD_ACCESS));
-
-                                    // Decode the value with xor
-                                    Value *decVal = IRB.CreateXor(keyVal, encVal);
-
-                                    if (auto *Op = dyn_cast<Instruction>(decVal)) {
-                                        addMetadata(*Op, MetaObf(OPAQUE_OP, 2llu));
-                                    }
-
-                                    // Store the value
-                                    StoreInst *storeClear = IRB.CreateStore(decVal, decodedGEP, /* volatile */ true);
-                                    addMetadata(*storeClear, MetaObf(PROTECT_FIELD_ACCESS));
-                                }
-
-                                I.setOperand(Op.getOperandNo(), clearBuffer);
-                                if (G->use_empty()) {
-                                    G->removeFromParent();
-                                }
                             }
 
+                            function_obf_map[F.getName().str()] = true;
                             Changed |= true;
-                        } else if (intType == Type::getInt32Ty(G->getParent()->getContext())) {
-                            std::vector<uint32_t> str;
-                            for (unsigned i = 0; i < data->getNumElements(); i++) {
-                                const uint64_t V = data->getElementAsInteger(i);
-                                str.emplace_back(V);
-                            }
-                            size_t StrSize = str.size();
-
-                            if (StrSize > 10) {
-                                CSPEntry *Entry = new CSPEntry();
-
-                                std::vector<uint32_t> encKey;
-                                getRandomBytes(encKey, 8, 16);
-                                int EncKeySize = encKey.size();
-                                // Entry->Data.reserve(StrSize);
-                                // for (unsigned I = 0; I < StrSize; ++I) {
-                                //     Entry->Data.push_back(static_cast<uint16_t>(str[I]) ^ Entry->EncKey[I % EncKeySize]);
-                                // }
-                                Entry->KeySize = EncKeySize;
-                                Entry->EncKey.resize(EncKeySize);
-                                Entry->Data.resize(StrSize);
-                                std::vector<uint32_t> encoded(StrSize);
-                                for (size_t I = 0; I < StrSize; ++I) {
-                                    // encoded[I] = static_cast<uint16_t>(str[I]) ^ static_cast<uint16_t>(Entry->EncKey[I % EncKeySize]);
-                                    encoded[I] = static_cast<uint32_t>(str[I]) ^ static_cast<uint32_t>(encKey[I % EncKeySize]);
-                                }
-                                Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
-                                Entry->Salt = cryptoutils->get_range(0xffff);
-                                ConstantAggregateZero *ZeroInit = ConstantAggregateZero::get(data->getType());
-                                string DecName = formatv("rise_dec_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
-                                                         Twine::utohexstr(Entry->Salt));
-                                GlobalVariable *DecGV =
-                                    new GlobalVariable(M, data->getType(), false, GlobalValue::PrivateLinkage, ZeroInit, DecName);
-                                DecGV->setAlignment(MaybeAlign(G->getAlignment()));
-                                Entry->DecGV = DecGV;
-
-                                std::vector<uint32_t> Data;
-                                std::vector<uint32_t> JunkBytes;
-                                JunkBytes.reserve(16);
-                                getRandomBytes(JunkBytes, 4, 16);
-                                Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
-                                Entry->Offset = static_cast<unsigned>(Data.size());
-                                // Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
-                                // Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
-                                Data.insert(Data.end(), encKey.begin(), encKey.end());
-                                Data.insert(Data.end(), encoded.begin(), encoded.end());
-                                JunkBytes.clear();
-                                getRandomBytes(JunkBytes, 2, 8);
-                                Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
-                                Constant *CDA = ConstantDataArray::get(Ctx, ArrayRef<uint32_t>(Data));
-                                string encStringName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
-                                                               Twine::utohexstr(Entry->Salt));
-                                Entry->EncryptedStringTable =
-                                    new GlobalVariable(M, CDA->getType(), true, GlobalValue::PrivateLinkage, CDA, encStringName);
-                                ConstantStringPool.push_back(Entry);
-                                I.replaceUsesOfWith(G, DecGV);
-                                if (G->use_empty()) {
-                                    G->eraseFromParent();
-                                }
-                            } else {
-                                std::vector<uint32_t> key(StrSize);
-                                std::generate(std::begin(key), std::end(key),
-                                              []() { return cryptoutils->get_range(1, std::numeric_limits<uint32_t>::max() - 1); });
-                                int temp = cryptoutils->get_range(0xffff);
-
-                                std::vector<uint32_t> encoded(str.size());
-                                for (size_t i = 0; i < str.size(); ++i) {
-                                    encoded[i] = static_cast<uint32_t>(str[i]) ^ static_cast<uint32_t>(key[i]);
-                                }
-                                string EncName = formatv("rise_enc_{0}_{1}", G->getName(), Twine::utohexstr(temp));
-                                Constant *StrEnc = ConstantDataArray::get(BB.getContext(), ArrayRef<uint32_t>(encoded));
-                                GlobalVariable *pEnc =
-                                    new GlobalVariable(M, StrEnc->getType(), true, GlobalValue::PrivateLinkage, StrEnc, EncName);
-                                G->replaceAllUsesWith(pEnc);
-
-                                IRBuilder<NoFolder> IRB(&BB);
-                                IRB.SetInsertPoint(&I);
-                                Use &EncPtr = Op;
-
-                                // Allocate a buffer on the stack that contains the decoded string
-                                string DecName = formatv("rise_dec_{0}_{1}", G->getName(), Twine::utohexstr(temp));
-                                AllocaInst *clearBuffer = IRB.CreateAlloca(IRB.getInt32Ty(), IRB.getInt32(StrSize), DecName);
-
-                                llvm::SmallVector<size_t, 20> indexes(StrSize);
-                                for (size_t i = 0; i < indexes.size(); ++i) {
-                                    indexes[i] = i;
-                                }
-                                std::shuffle(indexes.begin(), indexes.end(), *cryptoutils->getEng());
-
-                                for (size_t i = 0; i < StrSize; ++i) {
-                                    size_t j = indexes[i];
-                                    // Access the char in EncPtr[i]
-                                    Value *encGEP =
-                                        IRB.CreateGEP(IRB.getInt32Ty(), IRB.CreatePointerCast(EncPtr, IRB.getInt8PtrTy()), IRB.getInt32(j));
-
-                                    // Load the encoded char
-                                    LoadInst *encVal = IRB.CreateLoad(IRB.getInt32Ty(), encGEP);
-                                    addMetadata(*encVal, MetaObf(PROTECT_FIELD_ACCESS));
-
-                                    Value *decodedGEP = IRB.CreateGEP(IRB.getInt32Ty(), clearBuffer, IRB.getInt32(j));
-                                    StoreInst *storeKey = IRB.CreateStore(ConstantInt::get(IRB.getInt32Ty(), (key)[j]), decodedGEP,
-                                                                          /* volatile */ true);
-
-                                    addMetadata(*storeKey, {
-                                                               MetaObf(PROTECT_FIELD_ACCESS),
-                                                               MetaObf(OPAQUE_CST),
-                                                           });
-
-                                    LoadInst *keyVal = IRB.CreateLoad(IRB.getInt32Ty(), decodedGEP);
-                                    addMetadata(*keyVal, MetaObf(PROTECT_FIELD_ACCESS));
-
-                                    // Decode the value with xor
-                                    Value *decVal = IRB.CreateXor(keyVal, encVal);
-
-                                    if (auto *Op = dyn_cast<Instruction>(decVal)) {
-                                        addMetadata(*Op, MetaObf(OPAQUE_OP, 2llu));
-                                    }
-
-                                    // Store the value
-                                    StoreInst *storeClear = IRB.CreateStore(decVal, decodedGEP, /* volatile */ true);
-                                    addMetadata(*storeClear, MetaObf(PROTECT_FIELD_ACCESS));
-                                }
-
-                                I.setOperand(Op.getOperandNo(), clearBuffer);
-                                if (G->use_empty()) {
-                                    G->removeFromParent();
-                                }
-                            }
-
-                            Changed |= true;
+#pragma region disable int16/int32
+                            //} else if (intType == Type::getInt16Ty(G->getParent()->getContext())) {
+                            //    std::vector<uint16_t> str;
+                            //    for (unsigned i = 0; i < data->getNumElements(); i++) {
+                            //        const uint64_t V = data->getElementAsInteger(i);
+                            //        str.emplace_back(V);
+                            //    }
+                            //    size_t StrSize = str.size();
+                            //
+                            //    if (StrSize > 10) {
+                            //        CSPEntry *Entry = new CSPEntry();
+                            //
+                            //        std::vector<uint16_t> encKey;
+                            //        getRandomBytes(encKey, 8, 16);
+                            //        int EncKeySize = encKey.size();
+                            //        // Entry->Data.reserve(StrSize);
+                            //        // for (unsigned I = 0; I < StrSize; ++I) {
+                            //        //     Entry->Data.push_back(static_cast<uint16_t>(str[I]) ^ Entry->EncKey[I % EncKeySize]);
+                            //        // }
+                            //        Entry->KeySize = EncKeySize;
+                            //        Entry->EncKey.resize(EncKeySize);
+                            //        Entry->Data.resize(StrSize);
+                            //        std::vector<uint16_t> encoded(StrSize);
+                            //        for (size_t I = 0; I < StrSize; ++I) {
+                            //            // encoded[I] = static_cast<uint16_t>(str[I]) ^ static_cast<uint16_t>(Entry->EncKey[I %
+                            //            EncKeySize]); encoded[I] = static_cast<uint16_t>(str[I]) ^ static_cast<uint16_t>(encKey[I %
+                            //            EncKeySize]);
+                            //        }
+                            //        Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
+                            //        Entry->Salt = cryptoutils->get_range(0xffff);
+                            //        ConstantAggregateZero *ZeroInit = ConstantAggregateZero::get(data->getType());
+                            //        string DecName = formatv("rise_dec_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
+                            //                                 Twine::utohexstr(Entry->Salt));
+                            //        GlobalVariable *DecGV =
+                            //            new GlobalVariable(M, data->getType(), false, GlobalValue::PrivateLinkage, //ZeroInit, DecName);
+                            //        DecGV->setAlignment(MaybeAlign(G->getAlignment()));
+                            //        Entry->DecGV = DecGV;
+                            //
+                            //        std::vector<uint16_t> Data;
+                            //        std::vector<uint16_t> JunkBytes;
+                            //        JunkBytes.reserve(16);
+                            //        getRandomBytes(JunkBytes, 4, 16);
+                            //        Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
+                            //        Entry->Offset = static_cast<unsigned>(Data.size());
+                            //        // Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
+                            //        // Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
+                            //        Data.insert(Data.end(), encKey.begin(), encKey.end());
+                            //        Data.insert(Data.end(), encoded.begin(), encoded.end());
+                            //        JunkBytes.clear();
+                            //        getRandomBytes(JunkBytes, 2, 8);
+                            //        Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
+                            //        Constant *CDA = ConstantDataArray::get(Ctx, ArrayRef<uint16_t>(Data));
+                            //        string encStringName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
+                            //                                       Twine::utohexstr(Entry->Salt));
+                            //        Entry->EncryptedStringTable =
+                            //            new GlobalVariable(M, CDA->getType(), true, GlobalValue::PrivateLinkage, //CDA, encStringName);
+                            //        ConstantStringPool.push_back(Entry);
+                            //        I.replaceUsesOfWith(G, DecGV);
+                            //        if (G->use_empty()) {
+                            //            G->eraseFromParent();
+                            //        }
+                            //    } else {
+                            //        std::vector<uint16_t> key(StrSize);
+                            //        std::generate(std::begin(key), std::end(key),
+                            //                      []() { return cryptoutils->get_range(1, //std::numeric_limits<uint16_t>::max() - 1); });
+                            //        int temp = cryptoutils->get_range(0xffff);
+                            //
+                            //        std::vector<uint16_t> encoded(str.size());
+                            //        for (size_t i = 0; i < str.size(); ++i) {
+                            //            encoded[i] = static_cast<uint16_t>(str[i]) ^ static_cast<uint16_t>(key[i]);
+                            //        }
+                            //        string EncName = formatv("rise_enc_{0}_{1}", G->getName(), Twine::utohexstr(temp));
+                            //        Constant *StrEnc = ConstantDataArray::get(BB.getContext(), ArrayRef<uint16_t>(encoded));
+                            //        GlobalVariable *pEnc =
+                            //            new GlobalVariable(M, StrEnc->getType(), true, GlobalValue::PrivateLinkage, //StrEnc, EncName);
+                            //        G->replaceAllUsesWith(pEnc);
+                            //
+                            //        IRBuilder<NoFolder> IRB(&BB);
+                            //        IRB.SetInsertPoint(&I);
+                            //        Use &EncPtr = Op;
+                            //
+                            //        // Allocate a buffer on the stack that contains the decoded string
+                            //        string DecName = formatv("rise_dec_{0}_{1}", G->getName(), Twine::utohexstr(temp));
+                            //        AllocaInst *clearBuffer = IRB.CreateAlloca(IRB.getInt16Ty(), IRB.getInt32(StrSize), //DecName);
+                            //
+                            //        llvm::SmallVector<size_t, 20> indexes(StrSize);
+                            //        for (size_t i = 0; i < indexes.size(); ++i) {
+                            //            indexes[i] = i;
+                            //        }
+                            //        std::shuffle(indexes.begin(), indexes.end(), *cryptoutils->getEng());
+                            //
+                            //        for (size_t i = 0; i < StrSize; ++i) {
+                            //            size_t j = indexes[i];
+                            //            // Access the char in EncPtr[i]
+                            //            Value *encGEP =
+                            //                IRB.CreateGEP(IRB.getInt16Ty(), IRB.CreatePointerCast(EncPtr, IRB.getInt8PtrTy()),
+                            //                //IRB.getInt32(j));
+                            //
+                            //            // Load the encoded char
+                            //            LoadInst *encVal = IRB.CreateLoad(IRB.getInt16Ty(), encGEP);
+                            //            addMetadata(*encVal, MetaObf(PROTECT_FIELD_ACCESS));
+                            //
+                            //            Value *decodedGEP = IRB.CreateGEP(IRB.getInt16Ty(), clearBuffer, IRB.getInt32(j));
+                            //            StoreInst *storeKey = IRB.CreateStore(ConstantInt::get(IRB.getInt16Ty(), (key)[j]), //decodedGEP,
+                            //                                                  /* volatile */ true);
+                            //
+                            //            addMetadata(*storeKey, {
+                            //                                       MetaObf(PROTECT_FIELD_ACCESS),
+                            //                                       MetaObf(OPAQUE_CST),
+                            //                                   });
+                            //
+                            //            LoadInst *keyVal = IRB.CreateLoad(IRB.getInt16Ty(), decodedGEP);
+                            //            addMetadata(*keyVal, MetaObf(PROTECT_FIELD_ACCESS));
+                            //
+                            //            // Decode the value with xor
+                            //            Value *decVal = IRB.CreateXor(keyVal, encVal);
+                            //
+                            //            if (auto *Op = dyn_cast<Instruction>(decVal)) {
+                            //                addMetadata(*Op, MetaObf(OPAQUE_OP, 2llu));
+                            //            }
+                            //
+                            //            // Store the value
+                            //            StoreInst *storeClear = IRB.CreateStore(decVal, decodedGEP, /* volatile */ true);
+                            //            addMetadata(*storeClear, MetaObf(PROTECT_FIELD_ACCESS));
+                            //        }
+                            //
+                            //        I.setOperand(Op.getOperandNo(), clearBuffer);
+                            //        if (G->use_empty()) {
+                            //            G->removeFromParent();
+                            //        }
+                            //    }
+                            //
+                            //    Changed |= true;
+                            //} else if (intType == Type::getInt32Ty(G->getParent()->getContext())) {
+                            //    std::vector<uint32_t> str;
+                            //    for (unsigned i = 0; i < data->getNumElements(); i++) {
+                            //        const uint64_t V = data->getElementAsInteger(i);
+                            //        str.emplace_back(V);
+                            //    }
+                            //    size_t StrSize = str.size();
+                            //
+                            //    if (StrSize > 10) {
+                            //        CSPEntry *Entry = new CSPEntry();
+                            //
+                            //        std::vector<uint32_t> encKey;
+                            //        getRandomBytes(encKey, 8, 16);
+                            //        int EncKeySize = encKey.size();
+                            //        // Entry->Data.reserve(StrSize);
+                            //        // for (unsigned I = 0; I < StrSize; ++I) {
+                            //        //     Entry->Data.push_back(static_cast<uint16_t>(str[I]) ^ Entry->EncKey[I % EncKeySize]);
+                            //        // }
+                            //        Entry->KeySize = EncKeySize;
+                            //        Entry->EncKey.resize(EncKeySize);
+                            //        Entry->Data.resize(StrSize);
+                            //        std::vector<uint32_t> encoded(StrSize);
+                            //        for (size_t I = 0; I < StrSize; ++I) {
+                            //            // encoded[I] = static_cast<uint16_t>(str[I]) ^ static_cast<uint16_t>(Entry->EncKey[I %
+                            //            EncKeySize]); encoded[I] = static_cast<uint32_t>(str[I]) ^ static_cast<uint32_t>(encKey[I %
+                            //            EncKeySize]);
+                            //        }
+                            //        Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
+                            //        Entry->Salt = cryptoutils->get_range(0xffff);
+                            //        ConstantAggregateZero *ZeroInit = ConstantAggregateZero::get(data->getType());
+                            //        string DecName = formatv("rise_dec_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
+                            //                                 Twine::utohexstr(Entry->Salt));
+                            //        GlobalVariable *DecGV =
+                            //            new GlobalVariable(M, data->getType(), false, GlobalValue::PrivateLinkage, //ZeroInit, DecName);
+                            //        DecGV->setAlignment(MaybeAlign(G->getAlignment()));
+                            //        Entry->DecGV = DecGV;
+                            //
+                            //        std::vector<uint32_t> Data;
+                            //        std::vector<uint32_t> JunkBytes;
+                            //        JunkBytes.reserve(16);
+                            //        getRandomBytes(JunkBytes, 4, 16);
+                            //        Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
+                            //        Entry->Offset = static_cast<unsigned>(Data.size());
+                            //        // Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
+                            //        // Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
+                            //        Data.insert(Data.end(), encKey.begin(), encKey.end());
+                            //        Data.insert(Data.end(), encoded.begin(), encoded.end());
+                            //        JunkBytes.clear();
+                            //        getRandomBytes(JunkBytes, 2, 8);
+                            //        Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
+                            //        Constant *CDA = ConstantDataArray::get(Ctx, ArrayRef<uint32_t>(Data));
+                            //        string encStringName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(Entry->ID),
+                            //                                       Twine::utohexstr(Entry->Salt));
+                            //        Entry->EncryptedStringTable =
+                            //            new GlobalVariable(M, CDA->getType(), true, GlobalValue::PrivateLinkage, //CDA, encStringName);
+                            //        ConstantStringPool.push_back(Entry);
+                            //        I.replaceUsesOfWith(G, DecGV);
+                            //        if (G->use_empty()) {
+                            //            G->eraseFromParent();
+                            //        }
+                            //    } else {
+                            //        std::vector<uint32_t> key(StrSize);
+                            //        std::generate(std::begin(key), std::end(key),
+                            //                      []() { return cryptoutils->get_range(1, //std::numeric_limits<uint32_t>::max() - 1); });
+                            //        int temp = cryptoutils->get_range(0xffff);
+                            //
+                            //        std::vector<uint32_t> encoded(str.size());
+                            //        for (size_t i = 0; i < str.size(); ++i) {
+                            //            encoded[i] = static_cast<uint32_t>(str[i]) ^ static_cast<uint32_t>(key[i]);
+                            //        }
+                            //        string EncName = formatv("rise_enc_{0}_{1}", G->getName(), Twine::utohexstr(temp));
+                            //        Constant *StrEnc = ConstantDataArray::get(BB.getContext(), ArrayRef<uint32_t>(encoded));
+                            //        GlobalVariable *pEnc =
+                            //            new GlobalVariable(M, StrEnc->getType(), true, GlobalValue::PrivateLinkage, //StrEnc, EncName);
+                            //        G->replaceAllUsesWith(pEnc);
+                            //
+                            //        IRBuilder<NoFolder> IRB(&BB);
+                            //        IRB.SetInsertPoint(&I);
+                            //        Use &EncPtr = Op;
+                            //
+                            //        // Allocate a buffer on the stack that contains the decoded string
+                            //        string DecName = formatv("rise_dec_{0}_{1}", G->getName(), Twine::utohexstr(temp));
+                            //        AllocaInst *clearBuffer = IRB.CreateAlloca(IRB.getInt32Ty(), IRB.getInt32(StrSize), //DecName);
+                            //
+                            //        llvm::SmallVector<size_t, 20> indexes(StrSize);
+                            //        for (size_t i = 0; i < indexes.size(); ++i) {
+                            //            indexes[i] = i;
+                            //        }
+                            //        std::shuffle(indexes.begin(), indexes.end(), *cryptoutils->getEng());
+                            //
+                            //        for (size_t i = 0; i < StrSize; ++i) {
+                            //            size_t j = indexes[i];
+                            //            // Access the char in EncPtr[i]
+                            //            Value *encGEP =
+                            //                IRB.CreateGEP(IRB.getInt32Ty(), IRB.CreatePointerCast(EncPtr, IRB.getInt8PtrTy()),
+                            //                //IRB.getInt32(j));
+                            //
+                            //            // Load the encoded char
+                            //            LoadInst *encVal = IRB.CreateLoad(IRB.getInt32Ty(), encGEP);
+                            //            addMetadata(*encVal, MetaObf(PROTECT_FIELD_ACCESS));
+                            //
+                            //            Value *decodedGEP = IRB.CreateGEP(IRB.getInt32Ty(), clearBuffer, IRB.getInt32(j));
+                            //            StoreInst *storeKey = IRB.CreateStore(ConstantInt::get(IRB.getInt32Ty(), (key)[j]), //decodedGEP,
+                            //                                                  /* volatile */ true);
+                            //
+                            //            addMetadata(*storeKey, {
+                            //                                       MetaObf(PROTECT_FIELD_ACCESS),
+                            //                                       MetaObf(OPAQUE_CST),
+                            //                                   });
+                            //
+                            //            LoadInst *keyVal = IRB.CreateLoad(IRB.getInt32Ty(), decodedGEP);
+                            //            addMetadata(*keyVal, MetaObf(PROTECT_FIELD_ACCESS));
+                            //
+                            //            // Decode the value with xor
+                            //            Value *decVal = IRB.CreateXor(keyVal, encVal);
+                            //
+                            //            if (auto *Op = dyn_cast<Instruction>(decVal)) {
+                            //                addMetadata(*Op, MetaObf(OPAQUE_OP, 2llu));
+                            //            }
+                            //
+                            //            // Store the value
+                            //            StoreInst *storeClear = IRB.CreateStore(decVal, decodedGEP, /* volatile */ true);
+                            //            addMetadata(*storeClear, MetaObf(PROTECT_FIELD_ACCESS));
+                            //        }
+                            //
+                            //        I.setOperand(Op.getOperandNo(), clearBuffer);
+                            //        if (G->use_empty()) {
+                            //            G->removeFromParent();
+                            //        }
+                            //    }
+                            //
+                            //    Changed |= true;
+#pragma endregion
                         } else {
-                            errs() << "[StringObfuscation] Unprocessed type: " << intType->getTypeID() << "\n";
+                            errs() << "[StringObfuscation] Unprocessed type: " << intType->getTypeID() << ", " << data->getRawDataValues()
+                                   << "\n";
                         }
                     }
                 }
             }
 
-            if (ConstantStringPool.size() <= 0)
+            for (const auto &it : ConstantStringMap) {
+                CSPEntry *entery = it.second;
+                if (it.first.size() <= 10) {
+                    // replace the original string with the processed value
+                    entery->OriginGV->replaceAllUsesWith(entery->EncryptedStringTable);
+                }
+                // if the original string is no referenced, and released it
+                if (entery->OriginGV->use_empty()) {
+                    entery->OriginGV->removeFromParent();
+                }
+                if (it.first.size() <= 10) {
+                    delete (entery);
+                }
+            }
+            ConstantStringMap.clear();
+
+            if (ConstantStringPool.empty())
                 continue;
 
             Constant *S = ConstantInt::getNullValue(Type::getInt32Ty(Ctx));
@@ -644,17 +704,16 @@ class StringObfuscation : public ModulePass {
 
                 IRB_B.CreateBr(loopHeadBlock);
                 IRB_B.SetInsertPoint(loopHeadBlock);
-                Value *Size = ConstantInt::get(IRB_B.getInt32Ty(), Entry->Data.size());
+                Value *Size = ConstantInt::get(IRB_B.getInt32Ty(), Entry->EncData.size());
                 // Creates a loop variable i of type 32-bit integer
                 Value *i = IRB_B.CreateAlloca(IRB_B.getInt32Ty(), nullptr, "i");
                 IRB_B.CreateStore(IRB_B.getInt32(0), i); // Initialize i to 0
 
-                Type *pDataType = Entry->DecGV->getValueType()->getArrayElementType();
-                Value *OutBuf = IRB_B.CreateBitCast(Entry->DecGV, Entry->DecGV->getType());
+                Value *OutBuf = IRB_B.CreateBitCast(Entry->DecGV, IRB_B.getInt8PtrTy());
                 Value *Data = IRB_B.CreateInBoundsGEP(Entry->EncryptedStringTable->getValueType(), Entry->EncryptedStringTable,
                                                       {IRB_B.getInt32(0), IRB_B.getInt32(Entry->Offset)});
-                ConstantInt *KeySize = ConstantInt::get(Type::getInt32Ty(Ctx), Entry->KeySize);
-                Value *EncPtr = IRB_B.CreateInBoundsGEP(pDataType, Data, KeySize);
+                ConstantInt *KeySize = ConstantInt::get(Type::getInt32Ty(Ctx), Entry->EncKey.size());
+                Value *EncPtr = IRB_B.CreateInBoundsGEP(IRB_B.getInt8Ty(), Data, KeySize);
 
                 IRB_B.CreateBr(loopCondBlock);
                 IRB_B.SetInsertPoint(loopCondBlock);
@@ -670,15 +729,15 @@ class StringObfuscation : public ModulePass {
                 IRB_B.SetInsertPoint(loopBodyBlock);
 
                 // Perform an XOR calculation on value[i] using key[i]
-                Value *EncCharPtr = IRB_B.CreateInBoundsGEP(pDataType, EncPtr, iValue);
-                Value *EncChar = IRB_B.CreateLoad(pDataType, EncCharPtr);
+                Value *EncCharPtr = IRB_B.CreateInBoundsGEP(IRB_B.getInt8Ty(), EncPtr, iValue);
+                Value *EncChar = IRB_B.CreateLoad(IRB_B.getInt8Ty(), EncCharPtr);
 
                 Value *KeyIdx = IRB_B.CreateURem(iValue, KeySize);
-                Value *KeyCharPtr = IRB_B.CreateInBoundsGEP(pDataType, Data, KeyIdx);
-                Value *KeyChar = IRB_B.CreateLoad(pDataType, KeyCharPtr);
+                Value *KeyCharPtr = IRB_B.CreateInBoundsGEP(IRB_B.getInt8Ty(), Data, KeyIdx);
+                Value *KeyChar = IRB_B.CreateLoad(IRB_B.getInt8Ty(), KeyCharPtr);
 
                 Value *DecChar = IRB_B.CreateXor(EncChar, KeyChar);
-                Value *DecCharPtr = IRB_B.CreateInBoundsGEP(pDataType, OutBuf, iValue);
+                Value *DecCharPtr = IRB_B.CreateInBoundsGEP(IRB_B.getInt8Ty(), OutBuf, iValue);
                 IRB_B.CreateStore(DecChar, DecCharPtr);
 
                 // In the body of the loop, increase the value of i
@@ -706,6 +765,8 @@ class StringObfuscation : public ModulePass {
             Changed |= true;
         }
 
+        return Changed;
+
         std::set<GlobalVariable *> ConstantStringUsers;
         // collect all c strings
         for (GlobalVariable &GV : M.globals()) {
@@ -715,21 +776,27 @@ class StringObfuscation : public ModulePass {
             if (GV.isNullValue() || GV.isZeroValue()) {
                 continue;
             }
+            if (GV.getName().startswith("rise_"))
+                continue;
             Constant *Init = GV.getInitializer();
             if (Init == nullptr)
                 continue;
+
             if (ConstantDataSequential *CDS = dyn_cast<ConstantDataSequential>(Init)) {
                 if (CDS->isCString()) {
                     // errs() << CDS->getName() << ": " << CDS->getValueName() << ": " << Init->getNameOrAsOperand() << "\n";
                     StringRef Data = CDS->getRawDataValues();
                     CSPEntry *Entry = new CSPEntry();
-                    getRandomBytes(Entry->EncKey, 8, 32);
-                    Entry->Data.reserve(Data.size());
-                    for (unsigned I = 0; I < Data.size(); ++I) {
-                        Entry->Data.push_back(static_cast<uint8_t>(Data[I] ^ Entry->EncKey[I % Entry->EncKey.size()]));
-                    }
                     Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
                     Entry->Salt = cryptoutils->get_range(0xffffffff);
+                    Entry->EncKeySize = cryptoutils->get_range(8, 32);
+                    Entry->EncKey.resize(Entry->EncKeySize);
+                    std::generate(std::begin(Entry->EncKey), std::end(Entry->EncKey),
+                                  []() { return cryptoutils->get_range(1, std::numeric_limits<uint8_t>::max()); });
+                    Entry->EncData.reserve(Data.size());
+                    for (unsigned I = 0; I < Data.size(); ++I) {
+                        Entry->EncData.push_back(static_cast<uint8_t>(Data[I] ^ Entry->EncKey[I % Entry->EncKeySize]));
+                    }
                     ConstantAggregateZero *ZeroInit = ConstantAggregateZero::get(CDS->getType());
                     string DecName =
                         formatv("rise_dec_{0}_{1}_{2}", GV.getName(), Twine::utohexstr(Entry->ID), Twine::utohexstr(Entry->Salt));
@@ -784,7 +851,7 @@ class StringObfuscation : public ModulePass {
             Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
             Entry->Offset = static_cast<unsigned>(Data.size());
             Data.insert(Data.end(), Entry->EncKey.begin(), Entry->EncKey.end());
-            Data.insert(Data.end(), Entry->Data.begin(), Entry->Data.end());
+            Data.insert(Data.end(), Entry->EncData.begin(), Entry->EncData.end());
             JunkBytes.clear();
             getRandomBytes(JunkBytes, 4, 16);
             Data.insert(Data.end(), JunkBytes.begin(), JunkBytes.end());
@@ -804,11 +871,15 @@ class StringObfuscation : public ModulePass {
         for (Function &F : M) {
             if (F.isDeclaration())
                 continue;
+            if (function_obf_map[F.getName().str()])
+                continue;
             Changed |= processConstantStringUse(&F);
         }
 
         for (auto &I : CSUserMap) {
             CSUser *User = I.second;
+            if (function_obf_map[User->InitFunc->getName().str()])
+                continue;
             Changed |= processConstantStringUse(User->InitFunc);
         }
 
@@ -844,11 +915,17 @@ class StringObfuscation : public ModulePass {
         }
     }
     bool isValidToEncrypt(GlobalVariable *GV) {
-        if (GV->isConstant() && GV->hasInitializer()) {
-            return GV->getInitializer() != nullptr;
+        if (!GV->hasInitializer()) {
+            return false;
+        }
+        if (GV->isConstant()) {
+            return true;
+        } else if (isCFConstantStringTag(GV) || isObjCSelectorPtr(GV)) {
+            return true;
         }
         return false;
     }
+    
     bool processConstantStringUse(Function *F) {
         if (!toObfuscate(Flag, F, "strobf")) {
             errs() << "StringObfuscation off, fun: " << demangle(F->getName().str()) << ", flag: " << this->Flag << "\n";
@@ -1041,7 +1118,7 @@ class StringObfuscation : public ModulePass {
         Value *NewCounter = IRB.CreateAdd(LoopCounter, IRB.getInt32(1), "", true, true);
         LoopCounter->addIncoming(NewCounter, LoopBody);
 
-        Value *Cond = IRB.CreateICmpEQ(NewCounter, IRB.getInt32(static_cast<uint32_t>(Entry->Data.size())));
+        Value *Cond = IRB.CreateICmpEQ(NewCounter, IRB.getInt32(static_cast<uint32_t>(Entry->EncData.size())));
         IRB.CreateCondBr(Cond, UpdateDecStatus, LoopBody);
 
         IRB.SetInsertPoint(UpdateDecStatus);
@@ -1170,7 +1247,7 @@ class StringObfuscation : public ModulePass {
 };
 } // namespace llvm
 
-// 创建字符串加密
+// Create string obfuscation pass
 ModulePass *llvm::createStringObfuscation() { return new StringObfuscation(); }
 ModulePass *llvm::createStringObfuscation(bool Flag) { return new StringObfuscation(Flag); }
 char StringObfuscation::ID = 0;
