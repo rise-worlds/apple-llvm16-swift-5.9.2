@@ -783,7 +783,7 @@ class StringObfuscation : public ModulePass {
                 continue;
 
             if (ConstantDataSequential *CDS = dyn_cast<ConstantDataSequential>(Init)) {
-                if (CDS->isCString()) {
+                if (isCString(CDS)) {
                     // errs() << CDS->getName() << ": " << CDS->getValueName() << ": " << Init->getNameOrAsOperand() << "\n";
                     StringRef Data = CDS->getRawDataValues();
                     CSPEntry *Entry = new CSPEntry();
@@ -925,7 +925,7 @@ class StringObfuscation : public ModulePass {
         }
         return false;
     }
-    
+
     bool processConstantStringUse(Function *F) {
         if (!toObfuscate(Flag, F, "strobf")) {
             errs() << "StringObfuscation off, fun: " << demangle(F->getName().str()) << ", flag: " << this->Flag << "\n";
@@ -1042,6 +1042,40 @@ class StringObfuscation : public ModulePass {
         }
         return Changed;
     }
+
+    bool isCString(const ConstantDataSequential *CDS) {
+        // isString
+        if (!isa<ArrayType>(CDS->getType()))
+            return false;
+        if (!CDS->getElementType()->isIntegerTy(8) && !CDS->getElementType()->isIntegerTy(16) && !CDS->getElementType()->isIntegerTy(32))
+            return false;
+
+        for (unsigned i = 0, e = CDS->getNumElements(); i != e; ++i) {
+            uint64_t Elt = CDS->getElementAsInteger(i);
+            if (Elt == 0) {
+                return i == (e - 1); // last element is null
+            }
+        }
+        return false; // null not found
+    }
+    bool isObjCSelectorPtr(const GlobalVariable *GV) {
+        return GV->isExternallyInitialized() && GV->hasLocalLinkage() && GV->getName().startswith("OBJC_SELECTOR_REFERENCES_");
+    }
+
+    bool isCFConstantStringTag(const GlobalVariable *GV) {
+        const Constant *Init = GV->getInitializer();
+        if (Init == nullptr)
+            return false;
+        if (GV->getSection().startswith("llvm.")) {
+            return false;
+        }
+        if (const ConstantDataSequential *CDS = dyn_cast<ConstantDataSequential>(Init)) {
+            Type *ETy = CDS->getElementType();
+            return ETy->isStructTy() && ETy->getStructName() == "struct.__NSConstantString_tag";
+        }
+        return false;
+    }
+
     void deleteUnusedGlobalVariable() {
         bool Changed = true;
         while (Changed) {
@@ -1157,6 +1191,16 @@ class StringObfuscation : public ModulePass {
         IRB.SetInsertPoint(InitBlock);
         Constant *Init = User->GV->getInitializer();
         lowerGlobalConstant(Init, IRB, User->DecGV, User->Ty);
+
+        if (isObjCSelectorPtr(User->GV)) {
+            // resolve selector
+            FunctionCallee callee =
+                M->getOrInsertFunction("sel_registerName", FunctionType::get(IRB.getInt8PtrTy(), {IRB.getInt8PtrTy()}, false));
+            Function *sel_registerName = cast<Function>(callee.getCallee());
+            Value *Selector = IRB.CreateCall(sel_registerName, {Init});
+            IRB.CreateStore(Selector, User->DecGV);
+        }
+
         IRB.CreateStore(IRB.getInt32(1), User->DecStatus);
         IRB.CreateBr(Exit);
 
