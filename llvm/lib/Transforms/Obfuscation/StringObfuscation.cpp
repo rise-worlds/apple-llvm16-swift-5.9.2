@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -39,6 +40,11 @@ static cl::opt<uint32_t> ElementObfuscationProb("strobf_prob", cl::init(100), cl
                                                          "obfuscated by the -strobf pass"));
 static uint32_t ElementObfuscationProbTemp = 100;
 
+static cl::opt<uint32_t> ExpandStringMinLenght("strobf_expand_len", cl::init(10), cl::NotHidden,
+                                               cl::desc("If the string is less than [%], "
+                                                        "the calculation is directly expanded, by the -strobf pass"));
+static uint32_t ExpandStringMinLenghtTemp = 10;
+
 using namespace std;
 
 namespace llvm {
@@ -61,8 +67,9 @@ class StringObfuscation : public ModulePass {
   public:
     static char ID;
     bool Flag;
-    struct CSPEntry {
+    struct CSPEntry : std::enable_shared_from_this<CSPEntry> {
         CSPEntry() = default;
+        ~CSPEntry() = default;
 
         unsigned ID = 0;
         uint16_t Salt = 0;
@@ -93,9 +100,9 @@ class StringObfuscation : public ModulePass {
                                    // initialize DecGV
     };
 
-    std::vector<CSPEntry *> ConstantStringPool;
-    std::unordered_map<std::string, CSPEntry *> ConstantStringMap;
-    std::map<GlobalVariable *, CSPEntry *> CSPEntryMap;
+    std::vector<std::shared_ptr<CSPEntry>> ConstantStringPool;
+    std::map<std::string, std::shared_ptr<CSPEntry>> ConstantStringMap;
+    std::map<GlobalVariable *, std::shared_ptr<CSPEntry>> CSPEntryMap;
     std::map<GlobalVariable *, CSUser *> CSUserMap;
     // GlobalVariable *EncryptedStringTable = nullptr;
     std::set<GlobalVariable *> MaybeDeadGlobalVars;
@@ -106,14 +113,12 @@ class StringObfuscation : public ModulePass {
         // EncryptedStringTable = new GlobalVariable;
     }
     bool doFinalization(Module &) override {
-        for (CSPEntry *Entry : ConstantStringPool) {
-            delete (Entry);
-        }
         for (auto &I : CSUserMap) {
             CSUser *User = I.second;
             delete (User);
         }
         ConstantStringPool.clear();
+        ConstantStringMap.clear();
         CSPEntryMap.clear();
         CSUserMap.clear();
         MaybeDeadGlobalVars.clear();
@@ -124,9 +129,12 @@ class StringObfuscation : public ModulePass {
 
     bool runOnModule(Module &M) override {
         errs() << "Running StringObfuscation flag: " << this->Flag << "\n";
+        if (!this->Flag) {
+            return false;
+        }
 
         bool Changed = false;
-        std::unordered_map<std::string, bool> function_obf_map;
+        std::map<std::string, bool> function_obf_map;
         LLVMContext &Ctx = M.getContext();
         ConstantInt *Zero = ConstantInt::get(Type::getInt32Ty(Ctx), 0);
         for (Function &F : M) {
@@ -151,6 +159,8 @@ class StringObfuscation : public ModulePass {
                 errs() << "[StringObfuscation] off, fun: " << demangled << ", " << ProbTemp << "<=" << ElementObfuscationProbTemp << "\n";
                 continue;
             }
+            if (!toObfuscateUint32Option(&F, "strobf_expand_len", &ExpandStringMinLenghtTemp))
+                ExpandStringMinLenghtTemp = ExpandStringMinLenght;
 
             FixFunctionConstantExpr(&F);
             Instruction *begin_ins = nullptr;
@@ -227,24 +237,24 @@ class StringObfuscation : public ModulePass {
                             // std::string str = data->getRawDataValues().str();
                             // size_t StrSize = str.size();
                             // errs() << "[StringObfuscation] " << demangled << ": " << str << "\n";
-                            size_t StrSize = data->getElementByteSize();
+                            size_t StrSize = data->getNumElements();
                             std::string str;
                             str.resize(StrSize);
                             for (unsigned i = 0; i < data->getNumElements(); i++) {
                                 const uint32_t V = data->getElementAsInteger(i);
-                                str[i] = V;
+                                str[i] = static_cast<uint8_t>(V);
                             }
 
                             const auto &it = ConstantStringMap.find(str);
                             if (it != ConstantStringMap.end()) {
                                 // if string has already been processed, replace it with the processed value
-                                if (StrSize <= 10) {
-                                    I.setOperand(Op.getOperandNo(), it->second->DecLV);
-                                } else {
+                                if (StrSize > ExpandStringMinLenghtTemp) {
                                     I.replaceUsesOfWith(G, it->second->DecGV);
+                                } else {
+                                    I.setOperand(Op.getOperandNo(), it->second->DecLV);
                                 }
-                            } else if (StrSize > 10) {
-                                CSPEntry *pEntry = new CSPEntry();
+                            } else if (StrSize > ExpandStringMinLenghtTemp) {
+                                std::shared_ptr<CSPEntry> pEntry = std::make_shared<CSPEntry>();
                                 pEntry->ID = static_cast<unsigned>(ConstantStringPool.size());
                                 pEntry->Salt = cryptoutils->get_range(0xffff);
                                 pEntry->OriginGV = G;
@@ -290,7 +300,7 @@ class StringObfuscation : public ModulePass {
                                 //     G->eraseFromParent();
                                 // }
                             } else {
-                                CSPEntry *pEntry = new CSPEntry();
+                                std::shared_ptr<CSPEntry> pEntry = std::make_shared<CSPEntry>();
                                 pEntry->ID = static_cast<unsigned>(ConstantStringPool.size());
                                 pEntry->Salt = cryptoutils->get_range(0xffff);
                                 pEntry->OriginGV = G;
@@ -306,10 +316,11 @@ class StringObfuscation : public ModulePass {
                                 }
                                 string EncName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(pEntry->ID),
                                                          Twine::utohexstr(pEntry->Salt));
-                                Constant *StrEnc = ConstantDataArray::get(BB.getContext(), ArrayRef<uint8_t>(pEntry->EncData));
+                                Constant *CDA = ConstantDataArray::get(BB.getContext(), ArrayRef<uint8_t>(pEntry->EncData));
                                 GlobalVariable *pEnc =
-                                    new GlobalVariable(M, StrEnc->getType(), true, GlobalValue::PrivateLinkage, StrEnc, EncName);
+                                    new GlobalVariable(M, CDA->getType(), true, GlobalValue::PrivateLinkage, CDA, EncName);
                                 // G->replaceAllUsesWith(pEnc);
+                                I.replaceUsesOfWith(G, pEnc);
                                 pEntry->EncryptedStringTable = pEnc;
                                 ConstantStringMap.emplace(str, pEntry);
 
@@ -644,18 +655,11 @@ class StringObfuscation : public ModulePass {
                 }
             }
 
-            for (const auto &it : ConstantStringMap) {
-                CSPEntry *entery = it.second;
-                if (it.first.size() <= 10) {
-                    // replace the original string with the processed value
-                    entery->OriginGV->replaceAllUsesWith(entery->EncryptedStringTable);
-                }
-                // if the original string is no referenced, and released it
-                if (entery->OriginGV->use_empty()) {
-                    entery->OriginGV->removeFromParent();
-                }
-                if (it.first.size() <= 10) {
-                    delete (entery);
+            for (auto &it : ConstantStringMap) {
+                std::shared_ptr<CSPEntry> Entery = it.second;
+                //  if the original string is no referenced, and released it
+                if (Entery->OriginGV->use_empty()) {
+                    Entery->OriginGV->removeFromParent();
                 }
             }
             ConstantStringMap.clear();
@@ -671,8 +675,8 @@ class StringObfuscation : public ModulePass {
             BasicBlock *D = A->splitBasicBlock(A->getFirstNonPHIOrDbgOrLifetime(), "PrecedingBlock");
             BasicBlock *B = BasicBlock::Create(F.getContext(), "LoadStringDecBB", &F, D);
             // Change the terminal instruction of A to jump to B, and a new terminal instruction will be added later to jump to C
-            BranchInst *newBr = BranchInst::Create(B);
-            ReplaceInstWithInst(A->getTerminator(), newBr);
+            BranchInst *NewBr = BranchInst::Create(B);
+            ReplaceInstWithInst(A->getTerminator(), NewBr);
             IRBuilder<> IRB(A->getFirstNonPHIOrDbgOrLifetime());
 
             // Add atomic loads in A to check status
@@ -681,13 +685,13 @@ class StringObfuscation : public ModulePass {
             LI->setAlignment(Align(4));
 
             Value *ZeroValue = ConstantInt::get(IRB.getInt32Ty(), 0);
-            Value *condition = IRB.CreateICmpEQ(LI, ZeroValue);
+            Value *Condition = IRB.CreateICmpEQ(LI, ZeroValue);
             A->getTerminator()->eraseFromParent();
-            BranchInst::Create(B, D, condition, A);
+            BranchInst::Create(B, D, Condition, A);
 
             // Insert decrypt code block
             IRBuilder<> IRB_B(B);
-            for (CSPEntry *Entry : ConstantStringPool) {
+            for (std::shared_ptr<CSPEntry> Entry : ConstantStringPool) {
                 uint16_t tempId = cryptoutils->get_uint32_t();
                 // Create an initialization block for the loop
                 std::string headName = formatv("loop.head.{0}", tempId);
@@ -784,9 +788,8 @@ class StringObfuscation : public ModulePass {
 
             if (ConstantDataSequential *CDS = dyn_cast<ConstantDataSequential>(Init)) {
                 if (isCString(CDS)) {
-                    // errs() << CDS->getName() << ": " << CDS->getValueName() << ": " << Init->getNameOrAsOperand() << "\n";
                     StringRef Data = CDS->getRawDataValues();
-                    CSPEntry *Entry = new CSPEntry();
+                    std::shared_ptr<CSPEntry> Entry = std::make_shared<CSPEntry>();
                     Entry->ID = static_cast<unsigned>(ConstantStringPool.size());
                     Entry->Salt = cryptoutils->get_range(0xffffffff);
                     Entry->EncKeySize = cryptoutils->get_range(8, 32);
@@ -816,7 +819,7 @@ class StringObfuscation : public ModulePass {
         }
 
         // encrypt those strings, build corresponding decrypt function
-        for (CSPEntry *Entry : ConstantStringPool) {
+        for (std::shared_ptr<CSPEntry> Entry : ConstantStringPool) {
             Entry->DecFunc = buildDecryptFunction(&M, Entry);
         }
 
@@ -844,7 +847,7 @@ class StringObfuscation : public ModulePass {
         std::vector<uint8_t> JunkBytes;
 
         JunkBytes.reserve(16);
-        for (CSPEntry *Entry : ConstantStringPool) {
+        for (std::shared_ptr<CSPEntry> Entry : ConstantStringPool) {
             Data.clear();
             JunkBytes.clear();
             getRandomBytes(JunkBytes, 4, 16);
@@ -885,7 +888,7 @@ class StringObfuscation : public ModulePass {
 
         // delete unused global variables
         deleteUnusedGlobalVariable();
-        for (CSPEntry *Entry : ConstantStringPool) {
+        for (std::shared_ptr<CSPEntry> Entry : ConstantStringPool) {
             if (Entry->DecFunc->use_empty()) {
                 Entry->DecFunc->eraseFromParent();
                 Entry->DecGV->eraseFromParent();
@@ -978,7 +981,7 @@ class StringObfuscation : public ModulePass {
                                     Changed = true;
                                 }
                             } else if (Iter1 != CSPEntryMap.end()) { // GV is a constant string
-                                CSPEntry *Entry = Iter1->second;
+                                std::shared_ptr<CSPEntry> Entry = Iter1->second;
                                 if (DecryptedGV.count(GV) > 0) {
                                     Inst.replaceUsesOfWith(GV, Entry->DecGV);
                                 } else {
@@ -1017,7 +1020,7 @@ class StringObfuscation : public ModulePass {
                                     Changed = true;
                                 }
                             } else if (Iter1 != CSPEntryMap.end()) {
-                                CSPEntry *Entry = Iter1->second;
+                                std::shared_ptr<CSPEntry> Entry = Iter1->second;
                                 if (DecryptedGV.count(GV) > 0) {
                                     Inst.replaceUsesOfWith(GV, Entry->DecGV);
                                 } else {
@@ -1105,7 +1108,7 @@ class StringObfuscation : public ModulePass {
         }
     }
 
-    Function *buildDecryptFunction(Module *M, const CSPEntry *Entry) {
+    Function *buildDecryptFunction(Module *M, const std::shared_ptr<CSPEntry> Entry) {
         LLVMContext &Ctx = M->getContext();
         IRBuilder<> IRB(Ctx);
         FunctionType *FuncTy = FunctionType::get(Type::getVoidTy(Ctx), {Type::getInt8PtrTy(Ctx), Type::getInt8PtrTy(Ctx)}, false);
