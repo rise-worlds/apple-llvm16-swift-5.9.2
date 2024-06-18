@@ -306,13 +306,18 @@ class StringObfuscation : public ModulePass {
                                 pEntry->OriginGV = G;
                                 pEntry->OriginString = str;
                                 pEntry->OriginType = 8;
+                                // generate encode key
                                 pEntry->EncKey.resize(StrSize);
                                 std::generate(std::begin(pEntry->EncKey), std::end(pEntry->EncKey),
                                               []() { return cryptoutils->get_range(1, std::numeric_limits<uint8_t>::max()); });
-
-                                pEntry->EncData.resize(StrSize);
+                                // generate junk data
+                                int junkSize = cryptoutils->get_range(1, 4);
+                                pEntry->EncData.resize(StrSize + junkSize);
+                                std::generate(pEntry->EncData.begin(), pEntry->EncData.begin() + junkSize,
+                                              []() { return cryptoutils->get_range(1, std::numeric_limits<uint8_t>::max()); });
+                                // generate (str xor key) encode data
                                 for (size_t i = 0; i < StrSize; ++i) {
-                                    pEntry->EncData[i] = static_cast<uint8_t>(str[i]) ^ static_cast<uint8_t>(pEntry->EncKey[i]);
+                                    pEntry->EncData[i + junkSize] = static_cast<uint8_t>(str[i]) ^ static_cast<uint8_t>(pEntry->EncKey[i]);
                                 }
                                 string EncName = formatv("rise_enc_{0}_{1}_{2}", G->getName(), Twine::utohexstr(pEntry->ID),
                                                          Twine::utohexstr(pEntry->Salt));
@@ -342,8 +347,8 @@ class StringObfuscation : public ModulePass {
                                 for (size_t i = 0; i < StrSize; ++i) {
                                     size_t j = indexes[i];
                                     // Access the char in EncPtr[i]
-                                    Value *encGEP =
-                                        IRB.CreateGEP(IRB.getInt8Ty(), IRB.CreatePointerCast(EncPtr, IRB.getInt8PtrTy()), IRB.getInt32(j));
+                                    Value *encGEP = IRB.CreateGEP(IRB.getInt8Ty(), IRB.CreatePointerCast(EncPtr, IRB.getInt8PtrTy()),
+                                                                  IRB.getInt32(j + junkSize));
 
                                     // Load the encoded char
                                     LoadInst *encVal = IRB.CreateLoad(IRB.getInt8Ty(), encGEP);
